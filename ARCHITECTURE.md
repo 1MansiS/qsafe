@@ -12,7 +12,6 @@
 | Field | Value |
 |---|---|
 | Name | `qsafe` |
-| Binary | `qsafe` (v2) |
 | Module path | `github.com/1MansiS/qsafe` |
 | MCP server image | `ghcr.io/1mansis/qsafe-mcp` |
 | License | Apache 2.0 |
@@ -21,9 +20,9 @@
 
 ## Design Principles
 
-1. **MCP-first, CLI is v2.** The primary interface is an MCP server consumed by Claude, Cursor, or any MCP-compatible host. CLI comes later.
+1. **MCP-first.** The primary interface is an MCP server consumed by Claude, Cursor, or any MCP-compatible host.
 2. **RAG is an implementation detail.** MCP clients see only tool results. The RAG pipeline is internal to the server — swappable without changing the MCP interface.
-3. **Shared core.** Static analysis logic lives in `internal/scanner/` — imported by both the MCP server (v1) and CLI (v2). Written once.
+3. **Shared core.** Static analysis logic lives in `internal/scanner/` — imported by the MCP server. Written once, reusable if other interfaces are added later.
 4. **Clean Go ↔ Python boundary.** The MCP server (Go) calls the RAG service (Python/FastAPI) over a local HTTP API. The interface is stable; implementations are swappable.
 5. **Docker-first distribution.** Users run one `docker-compose up` or one `docker run`. Zero Go/Python setup required.
 
@@ -34,8 +33,7 @@
 ```
 qsafe/
 ├── cmd/
-│   ├── mcp-server/         # MCP server entrypoint (v1)
-│   └── qsafe/              # CLI entrypoint (v2, placeholder)
+│   └── mcp-server/         # MCP server entrypoint
 │
 ├── internal/
 │   ├── scanner/            # Core static analysis engine
@@ -192,10 +190,11 @@ change rarely. Rebuild index when a new standard is finalized (~annually).
 
 ### 3. Infrastructure
 
-**Qdrant:** Vector store for embeddings. Runs as a Docker container.
-Local for development; can be swapped for Qdrant Cloud for production.
+**Qdrant:** Vector store for embeddings.
+- **Development (Phases 0–4):** Qdrant Cloud free tier — no local Docker required.
+- **Production / OSS distribution (Phase 5):** Runs as a Docker container via docker-compose.
 
-**docker-compose.yml** orchestrates three services:
+**docker-compose.yml** orchestrates three services (Phase 5 target):
 ```
 services:
   qdrant:        # vector store
@@ -203,7 +202,14 @@ services:
   mcp-server:    # Go MCP server
 ```
 
-**User setup (MCP persona):**
+**Development setup (Phases 0–4):**
+Run the Go MCP server and Python RAG service natively; point both at Qdrant Cloud.
+```bash
+go run ./cmd/mcp-server          # Go MCP server, native
+uvicorn api.main:app --port 8000 # Python RAG service, native venv
+```
+
+**User setup (OSS, Phase 5+):**
 ```bash
 docker-compose up
 ```
@@ -257,7 +263,7 @@ qsafe MCP Server (Go, :8080)
 - [ ] Scaffold directory structure (all dirs, empty `.go` and `.py` stubs)
 - [ ] Confirm `modelcontextprotocol/go-sdk` compiles; write a hello-world MCP
       server that returns a hardcoded string
-- [ ] `docker-compose.yml` with Qdrant only; verify Qdrant is reachable
+- [ ] Sign up for Qdrant Cloud free tier; note cluster URL + API key in `.env`
 - [ ] `rag-pipeline/api/main.py`: stub FastAPI with `/health` and `/retrieve`
       returning hardcoded chunks
 - [ ] Wire Go MCP server → stub RAG service over HTTP; confirm round-trip
@@ -343,24 +349,30 @@ qsafe MCP Server (Go, :8080)
 - [ ] `Dockerfile.mcp-server` and `Dockerfile.rag`: multi-stage builds,
       minimal images
 - [ ] `docker-compose.yml`: production-ready, health checks, restart policies
+      (swap Qdrant Cloud env vars for local Qdrant container)
 - [ ] `.mcp.json.example`: copy-paste config for Claude and Cursor users
 - [ ] `README.md`: clear setup in under 5 minutes, demo GIF/video
 - [ ] MCP Inspector test pass: all four tools exercise correctly
 - [ ] Test against 3 real OSS repos (mixed Java/Python/Go)
-- [ ] GitHub Actions CI: lint, test, build Docker image on push
+- [ ] GitHub Actions CI: lint, test, build and push Docker image on push
+      (images built in CI — not locally)
+- [ ] Validate distribution in GitHub Codespaces: `docker-compose up` from a
+      clean environment, confirm end-to-end MCP tool invocations
 - [ ] Publish `ghcr.io/1mansis/qsafe-mcp` image
 - [ ] Deliverable: Public repo, working Docker image, demo video.
 
 ---
 
-### Phase 6 — CLI (v2, Future)
-*Deferred. Core logic already lives in `internal/scanner/` — CLI is a thin
-wrapper.*
+## Future Enhancements
 
-- [ ] `cmd/qsafe/main.go`: Cobra CLI with `scan`, `explain`, `assess` subcommands
-- [ ] SARIF output for GitHub Code Scanning integration
-- [ ] GitHub Actions workflow example: `qsafe assess` as a CI step
-- [ ] Homebrew tap / `go install` distribution
+Items deferred until after the OSS launch. Core static analysis logic in
+`internal/scanner/` is already structured to support these without rework.
+
+### CLI Interface
+- `cmd/qsafe/main.go`: Cobra CLI with `scan`, `explain`, `assess` subcommands
+- SARIF output for GitHub Code Scanning integration
+- GitHub Actions workflow example: `qsafe assess` as a CI step
+- Homebrew tap / `go install` distribution
 
 ---
 
@@ -381,7 +393,7 @@ wrapper.*
 
 ## Key Architectural Decisions
 
-**Why MCP-first, not CLI-first?**
+**Why MCP-first?**
 MCP is the differentiating component — it's what makes this an AI × security
 project rather than another SAST linter. The agentic multi-tool chaining
 (scan → explain → migrate in one conversation turn) is only possible via MCP.
