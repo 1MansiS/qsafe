@@ -30,3 +30,17 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+.env
+
+# qsafe-specific
+rag-pipeline/corpus/*.pdf
+.qdrant/
+*.sarif
+go.sum
