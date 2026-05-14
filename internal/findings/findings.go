@@ -14,6 +14,7 @@ type Finding struct {
 	File      string   `json:"file"`
 	Line      int      `json:"line"`
 	Severity  Severity `json:"severity"`
+	Detail    string   `json:"detail,omitempty"`
 }
 
 type FindingSet struct {

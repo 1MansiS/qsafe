@@ -1,0 +1,90 @@
+rules:
+  - id: python-rsa-pycryptodome
+    pattern: RSA.generate(...)
+    message: RSA key generation (PyCryptodome) detected. RSA is quantum-vulnerable. Migrate to ML-KEM-768 (FIPS 203).
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: RSA
+      usage: key_generation
+
+  - id: python-rsa-cryptography
+    pattern: rsa.generate_private_key(...)
+    message: RSA key generation (cryptography lib) detected. Migrate to ML-KEM-768 (FIPS 203).
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: RSA
+      usage: key_generation
+
+  - id: python-ec-cryptography
+    pattern: ec.generate_private_key(...)
+    message: Elliptic curve key generation detected. ECC is quantum-vulnerable. Migrate to ML-KEM (FIPS 203) or ML-DSA (FIPS 204).
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: ECDH
+      usage: key_generation
+
+  - id: python-aes-ecb-pycryptodome
+    patterns:
+      - pattern: AES.new($KEY, AES.MODE_ECB)
+      - pattern: AES.new($KEY, AES.MODE_ECB, ...)
+    message: AES in ECB mode (PyCryptodome) detected. ECB mode is insecure. Use AES-GCM instead.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: AES-ECB
+      usage: encryption
+
+  - id: python-aes-ecb-cryptography
+    pattern: modes.ECB()
+    message: AES in ECB mode (cryptography lib) detected. ECB mode is insecure. Use modes.GCM() instead.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: AES-ECB
+      usage: encryption
+
+  - id: python-3des-pycryptodome
+    pattern: DES3.new(...)
+    message: Triple DES (3DES) detected. 3DES is deprecated. Replace with AES-256-GCM.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: 3DES
+      usage: encryption
+
+  - id: python-rc4-pycryptodome
+    pattern: ARC4.new(...)
+    message: RC4 stream cipher detected. RC4 is cryptographically broken. Replace with AES-256-GCM.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      primitive: RC4
+      usage: encryption
+
+  - id: python-md5-hashlib
+    patterns:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.new("md5", ...)
+      - pattern: hashlib.new("MD5", ...)
+    message: MD5 hash detected. MD5 is collision-broken. Use hashlib.sha256() or hashlib.sha3_256().
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: MD5
+      usage: hashing
+
+  - id: python-sha1-hashlib
+    patterns:
+      - pattern: hashlib.sha1(...)
+      - pattern: hashlib.new("sha1", ...)
+      - pattern: hashlib.new("SHA1", ...)
+      - pattern: hashlib.new("sha-1", ...)
+    message: SHA-1 hash detected. SHA-1 is deprecated. Use hashlib.sha256().
+    languages: [python]
+    severity: WARNING
+    metadata:
+      primitive: SHA-1
+      usage: hashing
