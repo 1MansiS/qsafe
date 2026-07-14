@@ -20,3 +20,11 @@ type Finding struct {
 type FindingSet struct {
 	Findings []Finding `json:"findings"`
 }
+
+type CodebaseReport struct {
+	Root              string         `json:"root"`
+	FilesScanned      int            `json:"files_scanned"`
+	FilesWithFindings int            `json:"files_with_findings"`
+	ByPrimitive       map[string]int `json:"by_primitive"`
+	Findings          []Finding      `json:"findings"`
+}

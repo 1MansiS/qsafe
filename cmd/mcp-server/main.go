@@ -18,13 +18,8 @@ func main() {
 		ragURL = "http://localhost:8000"
 	}
 
-	rulesDir := os.Getenv("RULES_DIR")
-	if rulesDir == "" {
-		rulesDir = "rules"
-	}
-
 	rag := ragclient.New(ragURL)
-	scn := scanner.NewWithRulesDir(rulesDir)
+	scn := scanner.New()
 	server := qmcp.NewServer(rag, scn)
 
 	handler := sdkmcp.NewStreamableHTTPHandler(func(r *http.Request) *sdkmcp.Server {
@@ -33,7 +28,7 @@ func main() {
 
 	addr := ":8080"
 	log.Printf("qsafe MCP server listening on %s", addr)
-	log.Printf("RAG service: %s | rules: %s", ragURL, rulesDir)
+	log.Printf("RAG service: %s", ragURL)
 
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("server failed: %v", err)

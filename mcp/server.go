@@ -18,8 +18,13 @@ func NewServer(rag *ragclient.Client, scn *scanner.Scanner) *sdkmcp.Server {
 
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "scan_file",
-		Description: "Scan a source file for quantum-vulnerable cryptographic primitives. Returns a structured list of findings with primitive type, usage, line number, and severity. Supports Java, Python, Go, and C.",
+		Description: "Scan a source file for quantum-vulnerable cryptographic primitives. Returns a structured list of findings with primitive type, usage, line number, and severity. Supports Go and Python.",
 	}, tools.ScanFileHandler(scn))
+
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "assess_codebase",
+		Description: "Scan an entire directory or repository for quantum-vulnerable cryptographic primitives. Walks all Go and Python source files, aggregates findings, and returns a summary grouped by primitive plus the full finding list.",
+	}, tools.AssessCodebaseHandler(scn))
 
 	return server
 }

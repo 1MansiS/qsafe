@@ -44,16 +44,37 @@ def aes_ecb_cryptography(key, data):
     return encryptor.update(data) + encryptor.finalize()
 
 
-# 3DES — deprecated
-def triple_des(key, data):
+# 3DES (PyCryptodome) — deprecated
+def triple_des_pycryptodome(key, data):
     cipher = DES3.new(key, DES3.MODE_CBC)
     return cipher.encrypt(data)
 
 
-# RC4 — broken
-def rc4_encrypt(key, data):
+# 3DES (cryptography lib) — deprecated
+def triple_des_cryptography(key, nonce, data):
+    cipher = Cipher(algorithms.TripleDES(key), modes.CBC(nonce), backend=default_backend())
+    encryptor = cipher.encryptor()
+    return encryptor.update(data) + encryptor.finalize()
+
+
+# RC4 (PyCryptodome) — broken
+def rc4_pycryptodome(key, data):
     cipher = ARC4.new(key)
     return cipher.encrypt(data)
+
+
+# RC4 (cryptography lib) — broken
+def rc4_cryptography(key, data):
+    cipher = Cipher(algorithms.ARC4(key), mode=None, backend=default_backend())
+    encryptor = cipher.encryptor()
+    return encryptor.update(data) + encryptor.finalize()
+
+
+# Blowfish — deprecated, 64-bit block (SWEET32)
+def blowfish_cryptography(key, nonce, data):
+    cipher = Cipher(algorithms.Blowfish(key), modes.CBC(nonce), backend=default_backend())
+    encryptor = cipher.encryptor()
+    return encryptor.update(data) + encryptor.finalize()
 
 
 # MD5 — collision-broken

@@ -4,45 +4,36 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/1MansiS/qsafe/internal/findings"
 )
 
-type Scanner struct {
-	rulesDir string
-}
+type Scanner struct{}
 
-func New() *Scanner {
-	return &Scanner{rulesDir: "rules"}
-}
-
-func NewWithRulesDir(rulesDir string) *Scanner {
-	return &Scanner{rulesDir: rulesDir}
-}
+func New() *Scanner { return &Scanner{} }
 
 func (s *Scanner) ScanFile(path string) (*findings.FindingSet, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
 
-	lang, ok := detectLanguage(filepath.Ext(path))
-	if !ok {
+	var fs []findings.Finding
+	var err error
+
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		fs, err = scanGoFile(path)
+	case ".py":
+		fs, err = scanPythonFile(path)
+	default:
 		return &findings.FindingSet{}, nil
 	}
-
-	astResult, err := scanAST(content, path, lang)
 	if err != nil {
 		return nil, err
 	}
 
-	sgResult := runSemgrep(path, lang, s.rulesDir)
-
-	all := append(astResult, sgResult...)
-	all = deduplicate(all)
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].Line < all[j].Line
-	})
-
-	return &findings.FindingSet{Findings: all}, nil
+	fs = deduplicate(fs)
+	sort.Slice(fs, func(i, j int) bool { return fs[i].Line < fs[j].Line })
+	return &findings.FindingSet{Findings: fs}, nil
 }

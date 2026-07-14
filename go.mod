@@ -2,10 +2,7 @@ module github.com/1MansiS/qsafe
 
 go 1.26.1
 
-require (
-	github.com/modelcontextprotocol/go-sdk v1.6.0
-	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
-)
+require github.com/modelcontextprotocol/go-sdk v1.6.0
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect
@@ -13,5 +10,6 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 )

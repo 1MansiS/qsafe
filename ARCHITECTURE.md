@@ -37,10 +37,11 @@ qsafe/
 │
 ├── internal/
 │   ├── scanner/            # Core static analysis engine
-│   │   ├── ast.go          # tree-sitter AST parsing
-│   │   ├── semgrep.go      # Semgrep rule runner
-│   │   ├── findings.go     # Finding types, deduplication
-│   │   └── severity.go     # Severity scoring logic
+│   │   ├── scanner.go      # ScanFile / ScanDir dispatch
+│   │   ├── callgraph_go.go # Go: go/parser + go/ast import-alias walk
+│   │   ├── python.go       # Python: go:embed pyast.py, subprocess runner
+│   │   ├── pyast.py        # Embedded Python ast visitor (outputs JSON)
+│   │   └── codebase.go     # ScanDir: per-language walking + aggregation
 │   ├── findings/           # Shared finding data model
 │   └── ragclient/          # HTTP client → Python RAG service
 │
@@ -72,11 +73,10 @@ qsafe/
 │           ├── ecdh-to-mlkem.md
 │           └── ecdsa-to-mldsa.md
 │
-├── rules/                  # Semgrep YAML rules for crypto detection
-│   ├── java/
-│   ├── python/
-│   ├── go/
-│   └── c/
+├── testdata/
+│   ├── gomod/              # Go fixture module for scanner tests
+│   ├── vulnerable_crypto.py
+│   └── oss/                # Real OSS repos for integration testing
 │
 ├── docker/
 │   ├── Dockerfile.mcp-server
@@ -97,13 +97,13 @@ qsafe/
 **What it is:** A long-running Streamable HTTP server at `/mcp` that exposes
 four tools to any MCP-compatible LLM host.
 
-**Stack:** Go, `modelcontextprotocol/go-sdk`, `smacker/go-tree-sitter`
+**Stack:** Go, `modelcontextprotocol/go-sdk`
 
 **Tools exposed:**
 
 | Tool | Mechanism | Uses RAG? |
 |---|---|---|
-| `scan_file` | AST parsing + Semgrep rules | No — pure static analysis |
+| `scan_file` | Go: `go/ast` import-alias walk · Python: `ast` subprocess | No — pure static analysis |
 | `explain_finding` | LLM generation | Yes — RAG grounds explanation |
 | `suggest_migration` | LLM generation | Yes — RAG provides spec-accurate code |
 | `assess_codebase` | Aggregation + scoring | Partially — RAG for compliance mapping |
@@ -111,8 +111,10 @@ four tools to any MCP-compatible LLM host.
 **Tool details:**
 
 `scan_file(path: string) → FindingSet`
-- Runs tree-sitter AST analysis to detect classical primitives
-- Runs Semgrep rules over the target path
+- **Go files:** `go/parser` + `go/ast` — builds per-file import-alias map, walks
+  call expressions, resolves `X.Fn(...)` to canonical package path. O(1) memory.
+- **Python files:** embeds `pyast.py` (built-in `ast` module), invokes via
+  `python3 -` subprocess, parses JSON output. Handles all import alias forms.
 - Returns structured `FindingSet`: `[{ primitive, usage, file, line, severity }]`
 - No RAG involved — pure deterministic analysis
 
@@ -140,7 +142,7 @@ four tools to any MCP-compatible LLM host.
 **What it is:** An internal FastAPI service — not user-facing. Called by the
 MCP server over a local HTTP endpoint.
 
-**Stack:** Python, FastAPI, LlamaIndex, Qdrant, OpenAI embeddings + BM25
+**Stack:** Python, FastAPI, LlamaIndex, Qdrant (local Docker), `sentence-transformers` + BM25
 
 **Corpus:**
 
@@ -163,7 +165,7 @@ MCP server over a local HTTP endpoint.
 Query (primitive + usage context)
     ↓
 Hybrid retrieval:
-    Dense:  embedding similarity (text-embedding-3-small)
+    Dense:  embedding similarity (all-MiniLM-L6-v2, local)
     Sparse: BM25 over algorithm identifiers, RFC numbers, FIPS references
     → Cross-encoder reranking
     → Metadata filter: { primitive_type, operation }
@@ -190,9 +192,14 @@ change rarely. Rebuild index when a new standard is finalized (~annually).
 
 ### 3. Infrastructure
 
-**Qdrant:** Vector store for embeddings.
-- **Development (Phases 0–4):** Qdrant Cloud free tier — no local Docker required.
-- **Production / OSS distribution (Phase 5):** Runs as a Docker container via docker-compose.
+**Qdrant:** Vector store for embeddings. Runs locally via Docker from Phase 2
+onwards — no cloud account required at any stage.
+
+```bash
+docker run -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
+```
+
+~200 MB RAM. Data persists in the named volume between restarts.
 
 **docker-compose.yml** orchestrates three services (Phase 5 target):
 ```
@@ -202,9 +209,10 @@ services:
   mcp-server:    # Go MCP server
 ```
 
-**Development setup (Phases 0–4):**
-Run the Go MCP server and Python RAG service natively; point both at Qdrant Cloud.
+**Development setup (Phases 2–4):**
+Run the Go MCP server and Python RAG service natively; Qdrant runs in Docker.
 ```bash
+docker run -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant
 go run ./cmd/mcp-server          # Go MCP server, native
 uvicorn api.main:app --port 8000 # Python RAG service, native venv
 ```
@@ -236,8 +244,9 @@ Claude / Cursor (MCP client)
     ▼
 qsafe MCP Server (Go, :8080)
     │
-    ├─► scan_file
-    │       └─► tree-sitter AST + Semgrep rules
+    ├─► scan_file / ScanDir
+    │       ├─► .go  → go/parser + go/ast (per-file, O(1) memory)
+    │       └─► .py  → python3 subprocess (embedded pyast.py, JSON output)
     │           returns: FindingSet
     │
     ├─► explain_finding (for each finding)
@@ -263,7 +272,7 @@ qsafe MCP Server (Go, :8080)
 - [ ] Scaffold directory structure (all dirs, empty `.go` and `.py` stubs)
 - [ ] Confirm `modelcontextprotocol/go-sdk` compiles; write a hello-world MCP
       server that returns a hardcoded string
-- [ ] Sign up for Qdrant Cloud free tier; note cluster URL + API key in `.env`
+- [ ] Start local Qdrant via Docker: `docker run -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant`
 - [ ] `rag-pipeline/api/main.py`: stub FastAPI with `/health` and `/retrieve`
       returning hardcoded chunks
 - [ ] Wire Go MCP server → stub RAG service over HTTP; confirm round-trip
@@ -273,20 +282,18 @@ qsafe MCP Server (Go, :8080)
 ---
 
 ### Phase 1 — Static Analysis Engine (Weeks 2–3)
-*Goal: `scan_file` works end-to-end. No RAG yet.*
+*Goal: `scan_file` works end-to-end. No RAG yet.* ✅ **Complete.**
 
-- [ ] Integrate `smacker/go-tree-sitter` for Go, Python, Java, C
-- [ ] Write AST visitors that detect:
-  - RSA (key generation, encryption, signing)
-  - ECDH / ECDSA (key agreement, signing)
-  - AES-ECB, 3DES, RC4, DES
-  - MD5, SHA-1 in signature contexts
-  - Key sizes below threshold (RSA < 3072, ECC < 256-bit)
-- [ ] Write Semgrep YAML rules for same primitives (Java + Python first,
-      highest-value languages from Veracode experience)
-- [ ] Implement `findings.go`: deduplication, severity scoring
-- [ ] Register `scan_file` as MCP tool; test against synthetic vulnerable repos
-- [ ] Deliverable: `scan_file` returns real findings in Claude. Demo-able.
+- [x] Go: `go/parser` + `go/ast` per-file import-alias scanner
+      (`internal/scanner/callgraph_go.go`) — no type-checking, O(1) memory
+- [x] Python: embedded `pyast.py` visitor via `python3 -` subprocess
+      (`internal/scanner/python.go`) — handles all `import` alias forms
+- [x] Detect: RSA, ECDH, ECDSA, ECC, AES-ECB, 3DES, DES, RC4, MD5, SHA-1
+- [x] `internal/findings/`: `Finding` / `FindingSet` types, deduplication
+- [x] `scan_file` and `assess_codebase` MCP tools registered and wired
+- [x] Tested against `testdata/gomod/` (unit) and OSS repos (integration):
+      go-ethereum (1 397 files, 236 findings), paramiko, Vault
+- [x] Deliverable: `scan_file` returns real findings. `ScanDir` scans full repos.
 
 ---
 
@@ -295,8 +302,8 @@ qsafe MCP Server (Go, :8080)
 
 - [ ] Collect corpus: download FIPS 203/204/205, CNSA 2.0, RFC 9180
 - [ ] Write `ingest/chunker.py`: section-aware chunking with metadata tagging
-- [ ] Write `ingest/embedder.py`: embed chunks with `text-embedding-3-small`,
-      upsert into Qdrant
+- [ ] Write `ingest/embedder.py`: embed chunks with `sentence-transformers`
+      (`all-MiniLM-L6-v2`, local, no API key), upsert into local Qdrant
 - [ ] Write first-pass migration annotations for top 5 primitives:
   - RSA → ML-KEM (key exchange)
   - ECDH → ML-KEM (key agreement)
@@ -323,7 +330,7 @@ qsafe MCP Server (Go, :8080)
   - Returns: replacement algorithm, library, before/after code, hybrid-mode note
 - [ ] Add cross-encoder reranking to `retrieval/reranker.py`
 - [ ] Prompt engineering: iterate on explanation and migration prompts
-- [ ] Deliverable: Full demo — scan a Java file with RSA, explain it, get
+- [ ] Deliverable: Full demo — scan a Go/Python file with RSA, explain it, get
       migration plan to ML-KEM-768 with liboqs code snippet.
 
 ---
@@ -348,12 +355,12 @@ qsafe MCP Server (Go, :8080)
 
 - [ ] `Dockerfile.mcp-server` and `Dockerfile.rag`: multi-stage builds,
       minimal images
-- [ ] `docker-compose.yml`: production-ready, health checks, restart policies
-      (swap Qdrant Cloud env vars for local Qdrant container)
+- [ ] `docker-compose.yml`: production-ready, health checks, restart policies;
+      bundle pre-built Qdrant snapshot so users need zero API keys to run
 - [ ] `.mcp.json.example`: copy-paste config for Claude and Cursor users
 - [ ] `README.md`: clear setup in under 5 minutes, demo GIF/video
 - [ ] MCP Inspector test pass: all four tools exercise correctly
-- [ ] Test against 3 real OSS repos (mixed Java/Python/Go)
+- [ ] Test against 3 real OSS repos (Go + Python)
 - [ ] GitHub Actions CI: lint, test, build and push Docker image on push
       (images built in CI — not locally)
 - [ ] Validate distribution in GitHub Codespaces: `docker-compose up` from a
@@ -374,17 +381,46 @@ Items deferred until after the OSS launch. Core static analysis logic in
 - GitHub Actions workflow example: `qsafe assess` as a CI step
 - Homebrew tap / `go install` distribution
 
+### `--deep` Mode (Interprocedural Analysis for Go)
+
+The default scanner is per-file and O(1) memory. `--deep` would add an
+optional interprocedural callgraph analysis for Go, trading RAM for richer
+call-chain attribution.
+
+**Default (lightweight) mode — current behavior:**
+- `go/parser` + `go/ast`, one file at a time
+- Memory: O(1 file), ~instant on any repo size
+- Finds: all direct crypto calls (`rsa.GenerateKey(...)`, `md5.New()`, etc.)
+- Misses: interface dispatch (`signer.Sign()` where `signer crypto.Signer`),
+  function-variable indirection (`fn := rsa.GenerateKey; fn(...)`) — rare in
+  practice; the concrete call still exists in the importing file
+
+**`--deep` mode — future flag:**
+- `go/packages` (full type info) + `golang.org/x/tools/go/ssa` (SSA IR) +
+  `golang.org/x/tools/go/callgraph/cha` (Class Hierarchy Analysis)
+- Memory: ~2–5× the module's transitive closure; tested at ~10–15 GB for
+  modules with ~400 deps (Vault, go-ethereum scale) — requires 16 GB+ RAM
+- Finds additionally: indirect callers via interface dispatch chains; surfaces
+  call-chain attribution ("A → B → C → rsa.GenerateKey") for root-cause analysis
+- Implementation sketch: build SSA for all packages under the module path,
+  run CHA, filter edges to those where the callee transitively reaches a
+  `goCryptoTargets` package, walk the chain back to emit parent findings
+
+When to use `--deep`: targeted analysis of a single service (not a monorepo),
+on a machine with ≥16 GB free RAM, when you suspect interface-dispatched crypto
+or want full call chains for a compliance audit report.
+
 ---
 
 ## Tech Stack Summary
 
 | Layer | Technology | Rationale |
 |---|---|---|
-| MCP server | Go, `modelcontextprotocol/go-sdk` | Single binary, Docker-friendly, existing VulnCheck pattern |
-| AST analysis | `smacker/go-tree-sitter` | Multi-language, Go-native, production-grade |
-| Semgrep rules | YAML | Declarative, community-compatible, language-aware AST matching |
+| MCP server | Go, `modelcontextprotocol/go-sdk` | Single binary, Docker-friendly |
+| Go static analysis | `go/parser` + `go/ast` (stdlib) | Zero deps, O(1) memory per file, handles all import alias forms |
+| Python static analysis | Built-in `ast` module via subprocess | No install required, handles all `import`/`from` alias forms |
 | RAG service | Python, FastAPI | ML ecosystem maturity; Qdrant/LlamaIndex are Python-native |
-| Embeddings | `text-embedding-3-small` (OpenAI) | Quality/cost balance for a bounded technical corpus |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | Local, free, no API key; 80 MB model, sufficient for a bounded technical corpus |
 | Vector store | Qdrant | Strong hybrid search (dense + sparse), good Go + Python clients |
 | Reranking | Cross-encoder (sentence-transformers) | Improves retrieval precision on technical spec language |
 | Orchestration | docker-compose | Zero-setup for OSS users |

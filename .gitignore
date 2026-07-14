@@ -44,3 +44,8 @@ rag-pipeline/corpus/*.pdf
 .qdrant/
 *.sarif
 go.sum
+testdata/oss/
+
+# built binaries
+/scan
+/qsafe
