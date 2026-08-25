@@ -99,6 +99,25 @@ func TestScanDir_Go_Indirection_ScopeIsolation(t *testing.T) {
 	}
 }
 
+// TestScanDir_Go_Indirection_BlockScope is a regression test for a gap
+// found while reviewing the ScopeIsolation fix above: shadowing was scoped
+// to the enclosing *function*, not the enclosing *block*, so a block-local
+// shadow (inside an if/for) incorrectly blocked resolution for the rest of
+// the function too, not just within that block. See testdata/blockscope_check.
+func TestScanDir_Go_Indirection_BlockScope(t *testing.T) {
+	s := scanner.New()
+	report, err := s.ScanDir("../../testdata/blockscope_check")
+	if err != nil {
+		t.Fatalf("ScanDir: %v", err)
+	}
+	if report.ByPrimitive["RSA"] != 1 {
+		t.Fatalf("expected exactly 1 RSA finding (the call outside the if-block), got ByPrimitive: %v", report.ByPrimitive)
+	}
+	if report.Findings[0].Line != 25 { // keyGen(rand.Reader, 2048), after the if-block
+		t.Errorf("expected the RSA finding at line 25 (outside the if-block), got line %d", report.Findings[0].Line)
+	}
+}
+
 // TestScanDir_Go_Indirection covers one-hop function-value indirection:
 // `var keyGen = rsa.GenerateKey; keyGen(...)` should still be attributed to
 // RSA. It also documents what the *default* (opt-in features off) scan
@@ -127,7 +146,7 @@ func TestScanDir_Go_Indirection(t *testing.T) {
 // (WithInterfaceDispatch) — off by default (see TestScanDir_Go_Indirection,
 // which already confirms this same fixture's interface-dispatch call site
 // is invisible without the option), on when opted in. Validated against 5
-// real repos as a research/ prototype before graduating; see qsafe.md.
+// real repos as a research/ prototype before graduating.
 func TestScanDir_Go_InterfaceDispatch(t *testing.T) {
 	s := scanner.New()
 	report, err := s.ScanDir("../../testdata/indirect_gomod", scanner.WithInterfaceDispatch())

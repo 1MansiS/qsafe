@@ -6,9 +6,9 @@
 // GoBaselineDetector's findings, reused rather than reimplemented).
 //
 // This is deliberately a heuristic, not sound interprocedural dataflow —
-// see the design discussion in qsafe.md before assuming its output is as
-// trustworthy as a direct-call finding. No SSA, no callgraph; that's the
-// documented, expensive `--deep` mode alternative this is standing in for.
+// treat its output with lower confidence than a direct-call finding. No
+// SSA, no callgraph; this stands in for that much more expensive,
+// permanently out-of-scope full interprocedural analysis.
 //
 // All domain knowledge (which interfaces/methods/sink functions matter,
 // which primitives implement what) lives in rules/go/interface_dispatch.yaml

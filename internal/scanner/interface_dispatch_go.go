@@ -4,8 +4,8 @@
 //	func useSigner(s crypto.Signer, digest []byte) { s.Sign(...) }
 //
 // — invisible to scanGoFile's import-alias walk entirely. Validated as a
-// research/ prototype against 5 real repos before graduating here; see
-// qsafe.md for the full before/after evidence and false-positive review.
+// research/ prototype against 5 real repos before graduating here, with
+// every finding checked against source for false positives.
 //
 // Deliberately a heuristic, not sound interprocedural dataflow: no SSA, no
 // callgraph — that's the documented, much more expensive, permanently

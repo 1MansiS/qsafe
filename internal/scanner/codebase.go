@@ -30,9 +30,8 @@ func WithInterfaceDispatch() ScanOption {
 
 // ScanDir scans root for quantum-vulnerable crypto primitives. Go only —
 // walks .go files when a go.mod is present, using go/ast import-alias
-// tracking per file. See qsafe.md's "design for uniformity, build for Go
-// only" note: other languages are deliberately out of scope for now, not
-// forgotten.
+// tracking per file. Other languages are deliberately out of scope for
+// now, not forgotten.
 func (s *Scanner) ScanDir(root string, opts ...ScanOption) (*findings.CodebaseReport, error) {
 	var o scanOptions
 	for _, opt := range opts {

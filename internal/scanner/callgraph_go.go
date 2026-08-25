@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/tools/go/ast/astutil"
+
 	"github.com/1MansiS/qsafe/internal/findings"
 )
 
@@ -51,16 +53,40 @@ type varFuncRef struct {
 	importPath string // for severity lookup back into goRulesByImport
 }
 
-// varFuncKey scopes a varFuncRef binding to the function it was declared
-// in ("" for package-level), so a local variable in one function can never
-// match a call to a same-named-but-unrelated variable in a different
-// function — see the bug this fixes: a bare-name-only map let
-// `keyGen := add` in an unrelated function get misattributed to whatever
-// crypto primitive some other `keyGen` happened to be bound to elsewhere
-// in the file.
+// varFuncKey scopes a varFuncRef binding to the *block* it was declared in
+// (the Pos() of the innermost enclosing *ast.BlockStmt; token.NoPos for
+// package scope) — real Go lexical scoping, not just "which function":
+// a local variable in one function can never match a call to a
+// same-named-but-unrelated variable in a different function, and a name
+// shadowed inside one if/for block doesn't affect the rest of the
+// enclosing function outside that block. Function-level-only scoping was
+// tried first and found to have exactly that second gap — a block-local
+// shadow incorrectly blocked resolution for the rest of the function too.
 type varFuncKey struct {
-	scope string // enclosing function name, "" for package scope
+	scope token.Pos
 	name  string
+}
+
+// enclosingBlockChain returns the Pos() of every *ast.BlockStmt enclosing
+// pos, innermost first, followed by a final token.NoPos representing
+// package scope (always present, so callers can walk the chain outward
+// and are guaranteed to reach a terminal fallback).
+func enclosingBlockChain(file *ast.File, pos token.Pos) []token.Pos {
+	path, _ := astutil.PathEnclosingInterval(file, pos, pos)
+	var chain []token.Pos
+	for _, n := range path {
+		if b, ok := n.(*ast.BlockStmt); ok {
+			chain = append(chain, b.Pos())
+		}
+	}
+	return append(chain, token.NoPos)
+}
+
+// declaringScope is enclosingBlockChain(file, pos)[0] — the *immediate*
+// enclosing block of a declaration site (or token.NoPos if it's at
+// package level), used when recording where a name was bound.
+func declaringScope(file *ast.File, pos token.Pos) token.Pos {
+	return enclosingBlockChain(file, pos)[0]
 }
 
 // scanGoFile parses one Go file and returns findings based on import-alias
@@ -135,20 +161,26 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 			prim = rule.Primitive
 
 		case *ast.Ident:
-			callScope, _ := enclosingFuncName(f, call.Pos())
-			ref, ok := varFuncs[varFuncKey{callScope, fun.Name}]
-			if !ok {
-				if locallyShadowed[varFuncKey{callScope, fun.Name}] {
-					// A local declaration of this name exists in this scope
-					// but isn't itself crypto-bound (e.g. `keyGen := add`) —
-					// it still shadows any package-level binding of the same
-					// name, the same way Go's own scoping works. Must not
-					// fall through to the package-level match below.
-					return true
+			// Walk the real scope chain outward, innermost block first,
+			// stopping at the first block that declares this name at all —
+			// whether that declaration is crypto-bound (use it) or not
+			// (shadowed, stop searching outward without a match). This is
+			// what makes a block-local `keyGen := add` only shadow within
+			// its own block, not the whole enclosing function, while still
+			// correctly blocking a same-named package-level crypto binding
+			// from leaking into that block.
+			var ref varFuncRef
+			var found bool
+			for _, scope := range enclosingBlockChain(f, call.Pos()) {
+				if r, ok := varFuncs[varFuncKey{scope, fun.Name}]; ok {
+					ref, found = r, true
+					break
 				}
-				ref, ok = varFuncs[varFuncKey{"", fun.Name}] // fall back to a genuine package-level binding
+				if locallyShadowed[varFuncKey{scope, fun.Name}] {
+					break
+				}
 			}
-			if !ok {
+			if !found {
 				return true
 			}
 			prim, usage = ref.primitive, ref.usage
@@ -206,8 +238,7 @@ func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[varFuncKey
 		if !ok {
 			return
 		}
-		scope, _ := enclosingFuncName(f, declPos) // "" if this is a package-level declaration
-		refs[varFuncKey{scope, lhsName}] = varFuncRef{
+		refs[varFuncKey{declaringScope(f, declPos), lhsName}] = varFuncRef{
 			primitive:  rule.Primitive,
 			usage:      usage,
 			via:        ident.Name + "." + fn,
@@ -250,9 +281,10 @@ func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[varFuncKey
 func collectLocalDecls(f *ast.File) map[varFuncKey]bool {
 	shadowed := make(map[varFuncKey]bool)
 	mark := func(name string, pos token.Pos) {
-		if scope, ok := enclosingFuncName(f, pos); ok {
-			shadowed[varFuncKey{scope, name}] = true
-		}
+		shadowed[varFuncKey{declaringScope(f, pos), name}] = true
+	}
+	markAt := func(name string, scope token.Pos) {
+		shadowed[varFuncKey{scope, name}] = true
 	}
 
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -270,14 +302,16 @@ func collectLocalDecls(f *ast.File) map[varFuncKey]bool {
 				}
 			}
 		case *ast.FuncDecl:
-			// enclosingFuncName matches on the *body's* position range, so
-			// parameters (which sit before the body starts) need to be
-			// marked using a position inside the body, not the FuncDecl's
-			// own Pos() (the "func" keyword) — that would never match.
+			// Parameters belong exactly to the function's own top-level
+			// block — node.Body *is* that *ast.BlockStmt — so its Pos() is
+			// used directly as the scope, rather than querying
+			// declaringScope at some position inside the body (which would
+			// need to land past the opening brace to unambiguously resolve
+			// to this exact block rather than its own Pos() boundary).
 			if node.Body != nil && node.Type.Params != nil {
 				for _, field := range node.Type.Params.List {
 					for _, name := range field.Names {
-						mark(name.Name, node.Body.Pos())
+						markAt(name.Name, node.Body.Pos())
 					}
 				}
 			}

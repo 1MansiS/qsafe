@@ -1,9 +1,11 @@
 # qsafe — Architecture & Build Plan
 
-> **PQC Migration Advisor**: A static analysis tool that scans codebases for
-> classical cryptographic primitives and uses RAG over NIST PQC standards to
-> generate concrete, spec-grounded migration guidance — exposed as an MCP server
-> for AI assistant integration.
+> **PQC Migration Advisor**: A static analysis tool that scans Go codebases
+> for classical cryptographic primitives, using Go's own `go/ast`/`go/types`
+> tooling. It uses RAG over NIST PQC standards to generate concrete,
+> spec-grounded migration guidance: what quantum-safe algorithm to replace
+> each finding with, and how. Exposed as an MCP server for AI assistant
+> integration.
 
 ---
 
@@ -13,18 +15,17 @@
 |---|---|
 | Name | `qsafe` |
 | Module path | `github.com/1MansiS/qsafe` |
-| MCP server image | `ghcr.io/1mansis/qsafe-mcp` |
+| Distribution | `go install` / prebuilt release binaries. No Docker image planned for now. |
 | License | Apache 2.0 |
 
 ---
 
 ## Design Principles
 
-1. **MCP-first.** The primary interface is an MCP server consumed by Claude, Cursor, or any MCP-compatible host.
-2. **RAG is an implementation detail.** MCP clients see only tool results. The RAG pipeline is internal to the server — swappable without changing the MCP interface.
-3. **Shared core.** Static analysis logic lives in `internal/scanner/` — imported by the MCP server. Written once, reusable if other interfaces are added later.
-4. **Python is offline tooling, not a runtime dependency.** Reversed from the original design: there is no Python RAG service at runtime at all. Python (`rag-pipeline/ingest/`) only runs *offline*, maintainer-side, to build a flat-file retrieval index from the corpus — never shipped to or run by end users. See "Retrieval" below for why this was possible (the query space turned out to be bounded, not just the corpus).
-5. **Single-binary everything, no cgo, no forced Docker.** Reversed from the original Docker-first plan: the entire tool — scanning, retrieval, MCP serving — is one self-contained Go binary, zero cgo, zero subprocess, `go install`-able, because the actual near-term distribution path is an MCP server launched directly by the host (Claude Desktop, Cursor, Claude Code), where a Docker Desktop dependency and container spin-up latency are real friction, not a convenience. A tree-sitter-go scanning engine was prototyped and evaluated (see `research/`) and found to tie on capability with `go/ast`; a Qdrant+FastAPI RAG service was designed and then dropped once the corpus size (low thousands of chunks at most) made a dedicated vector database disproportionate to the actual problem. Both times, the lighter option won once actually measured against the real requirement rather than assumed.
+1. **MCP-first.** The primary interface is an MCP server consumed by Claude, Cursor, or any MCP-compatible host, launched directly by the host as a single binary.
+2. **RAG is an implementation detail, embedded in the same binary.** MCP clients see only tool results. Retrieval runs in-process, with no separate service to run alongside it, and is swappable without changing the MCP interface.
+3. **Shared core.** Static analysis logic lives in `internal/scanner/`, imported by the MCP server. Written once, reusable if other interfaces are added later.
+4. **Python is offline tooling, not a runtime dependency.** Python (`rag-pipeline/ingest/`) runs offline, maintainer-side, to build a flat-file retrieval index from the corpus. It's never shipped to or run by end users. See "Retrieval" below for why this works: the query space turned out to be bounded, not just the corpus.
 
 ---
 
@@ -37,7 +38,7 @@ qsafe/
 │   └── scan/               # Standalone CLI scanner (also useful for local/CI testing)
 │
 ├── internal/
-│   ├── scanner/            # Core static analysis engine — Go only, see qsafe.md
+│   ├── scanner/            # Core static analysis engine, Go only
 │   │   ├── scanner.go      # ScanFile / ScanDir dispatch
 │   │   ├── callgraph_go.go # go/parser + go/ast import-alias walk, direct calls;
 │   │   │                   # also extracts per-call-site context (literal
@@ -179,14 +180,12 @@ four tools to any MCP-compatible LLM host.
 
 ---
 
-### 2. Retrieval (embedded in the Go binary — no separate service)
+### 2. Retrieval (embedded in the Go binary)
 
 **What it is:** An in-process Go package (`internal/rag`), called directly
-by `internal/explain` — no HTTP boundary, no server, no port. Originally
-scoped as a Python FastAPI service + Qdrant, dropped once the corpus size
-(a handful of PDFs + hand-written playbooks, low thousands of chunks at
-most) made a dedicated vector database disproportionate to the actual
-retrieval problem. See `qsafe.md` for the full before/after reasoning.
+by `internal/explain`. No HTTP boundary, no server, no port. The corpus is
+small (a handful of PDFs plus hand-written playbooks, low thousands of
+chunks at most), so in-memory search is a natural fit at this scale.
 
 **The key enabler: the query side is bounded, not just the corpus.**
 `explain_finding`/`suggest_migration` never take free-text queries — the
@@ -357,10 +356,10 @@ flowchart TB
 ## Phased Build Plan
 
 ### Phase 0 — Foundations (Week 1)
-*Goal: repo skeleton, toolchain verified, nothing broken.* Historical —
-describes the original Qdrant/FastAPI-based scaffold; superseded by the
-embedded-retrieval design (see "Retrieval" above and `qsafe.md`), kept
-for history rather than rewritten:
+*Goal: repo skeleton, toolchain verified, nothing broken.* Historical:
+describes the original Qdrant/FastAPI-based scaffold, superseded by the
+embedded-retrieval design described in "Retrieval" above. Kept for
+history rather than rewritten:
 
 - [ ] Initialize monorepo: `go mod init github.com/1MansiS/qsafe`
 - [ ] Scaffold directory structure (all dirs, empty `.go` and `.py` stubs)
@@ -377,14 +376,12 @@ for history rather than rewritten:
 
 ### Phase 1 — Static Analysis Engine (Weeks 2–3)
 *Goal: `scan_file` works end-to-end. No RAG yet.* ✅ **Complete, since
-revised** — see `qsafe.md` for the full decision trail. Superseded
-details below, kept for history rather than rewritten:
+revised.** Superseded details below, kept for history rather than rewritten:
 
 - [x] Go: `go/parser` + `go/ast` per-file import-alias scanner
       (`internal/scanner/callgraph_go.go`) — no type-checking, O(1) memory
 - [x] ~~Python: embedded `pyast.py` visitor via `python3 -` subprocess~~ —
-      built, then **removed** to keep the repo focused on Go; see
-      `qsafe.md`'s "design for uniformity, build for Go only" note
+      built, then **removed** to keep the repo focused on Go for now
 - [x] ~~Detect: RSA, ECDH, ECDSA, ECC, AES-ECB, 3DES, DES, RC4, MD5, SHA-1~~ —
       scope later narrowed to **Shor-broken only** (RSA, ECDSA, ECDH,
       ECC); MD5/SHA-1/DES/3DES/RC4 are real crypto-hygiene issues but not
@@ -393,7 +390,7 @@ details below, kept for history rather than rewritten:
       plus `Confidence` (`direct`/`heuristic`) added later
 - [x] `scan_file` and `assess_codebase` MCP tools registered and wired
 - [x] Tested against `testdata/gomod/` (unit) and multiple real OSS repos
-      (integration) — see `qsafe.md` for the current repo list and results
+      (integration: cfssl, boulder, vault, caddy)
 - [x] Deliverable: `scan_file` returns real findings. `ScanDir` scans full repos.
 - [x] Rules moved from hardcoded Go maps to YAML (`rules/go/direct/*.yaml`)
 - [x] Interface-dispatch heuristic added (`rules/go/interface_dispatch.yaml`,
@@ -524,41 +521,35 @@ heuristic) or unreliable heuristics. Revisit only as a deliberate,
 scoped decision on its own — not folded in casually alongside the cheap
 per-call-site context that shipped instead.
 
-### Analysis depth — a deliberate ceiling, not a roadmap gap
+### Analysis depth: a deliberate ceiling
 
-qsafe intentionally does **not** do full interprocedural analysis (SSA +
-class hierarchy/call-graph analysis across a module's whole transitive
-dependency closure). That's a permanent scope boundary, not a flag
-deferred to later (an earlier draft of this design called this "`--deep`
-mode" — that name and the feature it described were both dropped; don't
-confuse it with the opt-in interface-dispatch flag below, which is a
-different, much lighter feature and deliberately not named `-deep` to
-avoid exactly that confusion) — see `qsafe.md`'s design notes for the
-full reasoning, in short: the cost (SSA + CHA over a module's full
-dependency closure runs ~2–5× the transitive closure in memory — ~10–15 GB
-observed at Vault/go-ethereum scale) isn't worth it against a lighter
-alternative that was actually built and validated instead.
+qsafe does not do full interprocedural analysis (SSA and class
+hierarchy/call-graph analysis across a module's whole transitive
+dependency closure). That's a permanent scope boundary. The cost is real:
+SSA and CHA over a module's full dependency closure runs roughly 2 to 5
+times the transitive closure in memory, around 10 to 15 GB observed at
+Vault and go-ethereum scale. The two tiers below cover the highest-value
+part of this at a fraction of that cost.
 
-**What's actually implemented, two tiers:**
-1. **Direct calls** (default, always on) — `go/parser` + `go/ast`, one
-   file at a time, O(1) memory. `rsa.GenerateKey(...)`, one-hop
-   function-variable indirection (`fn := rsa.GenerateKey; fn(...)`).
-2. **Interface dispatch** (opt-in — `WithInterfaceDispatch`/`-interface-dispatch`) —
-   `go/types`/`go/packages`, needs a buildable module. A heuristic, not
-   sound dataflow: attributes `crypto.Signer`/`crypto.Decrypter` call
-   sites (including ones buried inside stdlib sinks like
-   `x509.CreateCertificate`) to a candidate primitive only when that
-   primitive is also directly constructed elsewhere in the same module.
-   Findings carry `Confidence: heuristic`, not asserted with the same
-   certainty as a direct call. Validated against 5 real repos before
-   landing — see `rules/go/interface_dispatch.yaml` and `qsafe.md`.
+**Two tiers, both implemented:**
+1. **Direct calls** (default, always on). `go/parser` + `go/ast`, one
+   file at a time, O(1) memory. Covers direct crypto calls
+   (`rsa.GenerateKey(...)`) and one-hop function-variable indirection
+   (`fn := rsa.GenerateKey; fn(...)`).
+2. **Interface dispatch** (opt-in: `WithInterfaceDispatch` /
+   `-interface-dispatch`). `go/types` and `go/packages`, needs a
+   buildable module. A heuristic, not sound dataflow: attributes
+   `crypto.Signer`/`crypto.Decrypter` call sites (including ones buried
+   inside stdlib sinks like `x509.CreateCertificate`) to a candidate
+   primitive when that primitive is also directly constructed elsewhere
+   in the same module. Findings carry `Confidence: heuristic`, not the
+   same certainty as a direct call. Validated against 5 real repos (see
+   `rules/go/interface_dispatch.yaml`) before landing.
 
-**Permanently out of scope:** full call-chain attribution ("A → B → C →
-rsa.GenerateKey" across arbitrary interprocedural paths), cross-package
-interface resolution beyond the same-module heuristic above, and
-anything requiring a whole-program SSA build. If a finding needs that
-level of proof, it's a documented, accepted gap — see `qsafe.md`'s
-tracked-gaps list — not something qsafe is working toward closing.
+**Out of scope:** full call-chain attribution across arbitrary
+interprocedural paths, cross-package interface resolution beyond the
+same-module heuristic above, and anything requiring a whole-program SSA
+build.
 
 ---
 

@@ -20,9 +20,8 @@ const (
 // a direct one; it just shouldn't be asserted with the same certainty.
 //
 // Set explicitly by every producer, never left to the Go zero-value. Only
-// Go is scanned today (see qsafe.md's "design for uniformity, build for Go
-// only" note) — if/when another language's scanner is added, it must set
-// this explicitly too, not rely on the zero-value defaulting to anything
+// Go is scanned today. If/when another language's scanner is added, it must
+// set this explicitly too, not rely on the zero-value defaulting to anything
 // meaningful.
 type Confidence string
 
