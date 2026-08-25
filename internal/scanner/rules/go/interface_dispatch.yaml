@@ -1,0 +1,77 @@
+# Interface-dispatch rules — see internal/scanner/interface_dispatch_go.go.
+# Validated as research/internal/detect/go_types.go before graduating here
+# (2026-08-24); qsafe.md has the full before/after evidence across 5 real
+# repos. Two `kind`s of rule, both needing type info to match — neither is
+# expressible as a plain import/function allowlist:
+#
+#   receiver — x.Method(...) where x's static type is the named interface.
+#     e.g. `s.Sign(...)` where s is typed crypto.Signer, no lexical tie to
+#     any concrete crypto package in this file.
+#
+#   argument — a call to a known function/method where one argument's
+#     static type is the named interface. Needed because some interface
+#     method calls happen *inside the standard library's own
+#     implementation* (e.g. x509.CreateCertificate calls signer.Sign()
+#     internally) — structurally invisible to any source-level analysis
+#     otherwise. See qsafe.md, smallstep/certificates finding, 2026-08-24.
+#
+# `implementers` is fixed domain knowledge (which of our tracked
+# primitives' key types are known to implement this interface), not
+# computed — same role as rules/go/shor.yaml's per-function usage labels.
+# A finding only fires if the module *also* directly constructs one of the
+# listed primitives elsewhere (see GoTypesDetector) — that's what keeps
+# this from firing on every interface-typed variable in existence.
+
+- kind: receiver
+  interface_package: crypto
+  interface_name: Signer
+  method: Sign
+  usage: signing
+  implementers: [RSA, ECDSA]
+
+- kind: receiver
+  interface_package: crypto
+  interface_name: Decrypter
+  method: Decrypt
+  usage: encryption
+  implementers: [RSA]
+
+- kind: argument
+  func: crypto/x509.CreateCertificate
+  arg_index: 4
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA]
+
+- kind: argument
+  func: crypto/x509.CreateCertificateRequest
+  arg_index: 2
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA]
+
+- kind: argument
+  func: crypto/x509.CreateRevocationList
+  arg_index: 3
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA]
+
+- kind: argument
+  func: golang.org/x/crypto/ocsp.CreateResponse
+  arg_index: 3
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA]
+
+# Deliberately not included yet, see qsafe.md for why:
+#   - crypto/x509.Certificate.CreateCRL — deprecated, and a method call on
+#     an arbitrary local receiver rather than a package-qualified function,
+#     doesn't fit the `func:` matching shape here.
+#   - crypto/tls.Certificate.PrivateKey — a struct field, not a function
+#     argument at all; needs a third `kind` (struct_field) this schema
+#     doesn't have yet.

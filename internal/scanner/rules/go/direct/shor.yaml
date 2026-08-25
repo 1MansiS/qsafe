@@ -1,0 +1,82 @@
+# Shor-broken Go crypto detection rules — RSA/ECDSA/ECDH/ECC only.
+#
+# qsafe is a PQC migration advisor: its scope is primitives Shor's algorithm
+# actually breaks (factoring, discrete log). MD5/SHA-1/DES/3DES/RC4 are real
+# crypto hygiene issues but not quantum-migration relevant, and were removed
+# from scope — see qsafe.md notes, "PQC Migration Advisor scope" decision.
+#
+# Each rule's `functions` map is an intentional allowlist, not "every call
+# into this package". Two lessons baked in from the tree-sitter-go research
+# spike (see qsafe.md, 2026-08-23/24), applied here for the first time to
+# the real (non-spike) scanner:
+#   1. Only include a function if the call site alone — no cross-call
+#      data-flow tracing — is enough to (a) identify the algorithm and
+#      (b) motivate a specific migration action.
+#   2. crypto/elliptic's Marshal/Unmarshal/ScalarMult/ScalarBaseMult are
+#      deliberately excluded: the curve is a parameter, not named by the
+#      function, and in real code they're always co-located with a
+#      GenerateKey/curve-constant call that already produces the
+#      actionable finding — a separate finding here would be redundant
+#      noise once RAG-generated migration guidance is attached to it.
+#
+# Known gaps, not yet covered (see qsafe.md "Rule coverage gaps" — each
+# needs its own `go doc` pass before rules get written, not a guess):
+#   - crypto/ed25519 (stdlib, Go 1.13+)
+#   - golang.org/x/crypto/curve25519 (X25519) — confirmed real & total
+#     gap via wireguard-go (0/0 findings from both engines)
+#   - golang.org/x/crypto/ssh (uses RSA/ECDSA/ed25519 for host/user keys)
+
+- primitive: RSA
+  import: crypto/rsa
+  category: shor
+  severity: high
+  functions:
+    GenerateKey: key_generation
+    SignPKCS1v15: signing
+    SignPSS: signing
+    VerifyPKCS1v15: signing
+    VerifyPSS: signing
+    EncryptPKCS1v15: encryption
+    DecryptPKCS1v15: encryption
+    EncryptOAEP: encryption
+    DecryptOAEP: encryption
+
+- primitive: ECDSA
+  import: crypto/ecdsa
+  category: shor
+  severity: high
+  functions:
+    GenerateKey: key_generation
+    Sign: signing
+    SignASN1: signing
+    Verify: signing
+    VerifyASN1: signing
+
+- primitive: ECDH
+  import: crypto/ecdh
+  category: shor
+  severity: high
+  functions:
+    # Curve constructors — GenerateKey/NewPublicKey/NewPrivateKey are
+    # methods on the returned Curve value (e.g. ecdh.P256().GenerateKey(...)),
+    # not package-level calls, so the import-alias walk can't see them
+    # directly. The curve-selection call alone is still the actionable
+    # signal — confirmed against real code (boulder: ecdh.P384()...).
+    P256: key_generation
+    P384: key_generation
+    P521: key_generation
+    X25519: key_generation
+
+- primitive: ECC
+  import: crypto/elliptic
+  category: shor
+  severity: medium
+  functions:
+    GenerateKey: key_generation
+    P224: key_generation
+    P256: key_generation
+    P384: key_generation
+    P521: key_generation
+    # Marshal, Unmarshal, MarshalCompressed, UnmarshalCompressed,
+    # ScalarMult, ScalarBaseMult, IsOnCurve, Params — deliberately
+    # excluded, see header comment.

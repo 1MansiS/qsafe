@@ -24,8 +24,6 @@ func (s *Scanner) ScanFile(path string) (*findings.FindingSet, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go":
 		fs, err = scanGoFile(path)
-	case ".py":
-		fs, err = scanPythonFile(path)
 	default:
 		return &findings.FindingSet{}, nil
 	}

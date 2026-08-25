@@ -1,22 +1,26 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/1MansiS/qsafe/internal/findings"
 	"github.com/1MansiS/qsafe/internal/scanner"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: scan <dir|https://github.com/...>")
+	deep := flag.Bool("deep", false, "also run the go/types interface-dispatch heuristic (needs a buildable module — resolved deps, Go toolchain, possibly network)")
+	flag.Parse()
+	if flag.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: scan [-deep] <dir|https://github.com/...>")
 		os.Exit(1)
 	}
 
-	target := os.Args[1]
+	target := flag.Arg(0)
 	label := target
 
 	if isRemoteURL(target) {
@@ -29,8 +33,13 @@ func main() {
 		target = tmp
 	}
 
+	var opts []scanner.ScanOption
+	if *deep {
+		opts = append(opts, scanner.WithInterfaceDispatch())
+	}
+
 	s := scanner.New()
-	r, err := s.ScanDir(target)
+	r, err := s.ScanDir(target, opts...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -50,9 +59,33 @@ func main() {
 		if isRemoteURL(label) {
 			file = repoRelative(file)
 		}
-		fmt.Printf("  [%-6s] %-10s %-16s %s:%d\n",
-			string(f.Severity), f.Primitive, f.Usage, file, f.Line)
+		conf := ""
+		if f.Confidence == findings.ConfidenceHeuristic {
+			conf = "  (" + f.Detail + ")"
+		}
+		fmt.Printf("  [%-6s] %-10s %-16s %s:%d%s\n",
+			string(f.Severity), f.Primitive, f.Usage, file, f.Line, conf)
+		if f.Context != nil {
+			fmt.Printf("      %s\n", formatContext(f.Context))
+		}
 	}
+}
+
+func formatContext(c *findings.Context) string {
+	var parts []string
+	if c.Function != "" {
+		if c.InTest {
+			parts = append(parts, fmt.Sprintf("in %s() (test file)", c.Function))
+		} else {
+			parts = append(parts, fmt.Sprintf("in %s()", c.Function))
+		}
+	} else if c.InTest {
+		parts = append(parts, "(test file)")
+	}
+	if len(c.Arguments) > 0 {
+		parts = append(parts, "args: "+strings.Join(c.Arguments, ", "))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func isRemoteURL(s string) bool {
