@@ -50,10 +50,20 @@ func formatReport(r *findings.CodebaseReport) string {
 	if len(r.Findings) > 0 {
 		sb.WriteString("\nFindings:\n")
 		for _, f := range r.Findings {
-			fmt.Fprintf(&sb, "  [%s] %s:%d %s (%s)\n", strings.ToUpper(string(f.Severity)), f.File, f.Line, f.Primitive, f.Usage)
+			conf := ""
+			if f.Confidence == findings.ConfidenceHeuristic {
+				conf = "  [heuristic]"
+			}
+			fmt.Fprintf(&sb, "  [%s] %s:%d %s (%s)%s\n", strings.ToUpper(string(f.Severity)), f.File, f.Line, f.Primitive, f.Usage, conf)
+			if f.Detail != "" {
+				fmt.Fprintf(&sb, "      %s\n", f.Detail)
+			}
+			if f.Context != nil {
+				fmt.Fprintf(&sb, "      context: %s\n", f.Context.String())
+			}
 		}
 	}
 
-	sb.WriteString("\nUse explain_finding or suggest_migration for remediation guidance.")
+	sb.WriteString("\nUse explain_finding or suggest_migration for remediation guidance — pass each finding's function/in_test/arguments (from its context line above) along for richer grounding.")
 	return sb.String()
 }

@@ -13,10 +13,17 @@ import (
 )
 
 func main() {
-	deep := flag.Bool("deep", false, "also run the go/types interface-dispatch heuristic (needs a buildable module — resolved deps, Go toolchain, possibly network)")
+	// Named -interface-dispatch, not -deep: this repo explicitly rejected
+	// full SSA/CHA interprocedural analysis ("--deep mode" in the original
+	// design) as permanently out of scope — see ARCHITECTURE.md's "Analysis
+	// depth" section. This flag enables a much lighter go/types heuristic
+	// instead (scanner.WithInterfaceDispatch), a different feature; reusing
+	// the old name would wrongly imply it's a smaller version of the
+	// rejected mode rather than a distinct, deliberately-scoped one.
+	interfaceDispatch := flag.Bool("interface-dispatch", false, "also run the go/types interface-dispatch heuristic (needs a buildable module — resolved deps, Go toolchain, possibly network)")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: scan [-deep] <dir|https://github.com/...>")
+		fmt.Fprintln(os.Stderr, "usage: scan [-interface-dispatch] <dir|https://github.com/...>")
 		os.Exit(1)
 	}
 
@@ -34,7 +41,7 @@ func main() {
 	}
 
 	var opts []scanner.ScanOption
-	if *deep {
+	if *interfaceDispatch {
 		opts = append(opts, scanner.WithInterfaceDispatch())
 	}
 
@@ -66,26 +73,9 @@ func main() {
 		fmt.Printf("  [%-6s] %-10s %-16s %s:%d%s\n",
 			string(f.Severity), f.Primitive, f.Usage, file, f.Line, conf)
 		if f.Context != nil {
-			fmt.Printf("      %s\n", formatContext(f.Context))
+			fmt.Printf("      %s\n", f.Context.String())
 		}
 	}
-}
-
-func formatContext(c *findings.Context) string {
-	var parts []string
-	if c.Function != "" {
-		if c.InTest {
-			parts = append(parts, fmt.Sprintf("in %s() (test file)", c.Function))
-		} else {
-			parts = append(parts, fmt.Sprintf("in %s()", c.Function))
-		}
-	} else if c.InTest {
-		parts = append(parts, "(test file)")
-	}
-	if len(c.Arguments) > 0 {
-		parts = append(parts, "args: "+strings.Join(c.Arguments, ", "))
-	}
-	return strings.Join(parts, ", ")
 }
 
 func isRemoteURL(s string) bool {

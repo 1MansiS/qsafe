@@ -1,5 +1,10 @@
 package findings
 
+import (
+	"fmt"
+	"strings"
+)
+
 type Severity string
 
 const (
@@ -42,6 +47,30 @@ type Context struct {
 	Function  string   `json:"function,omitempty"`
 	InTest    bool     `json:"in_test,omitempty"`
 	Arguments []string `json:"arguments,omitempty"`
+}
+
+// String renders c as a short human-readable clause, e.g. "in useRSA(),
+// args: rand.Reader, 2048" — shared by every text-formatting call site
+// (cmd/scan, mcp/tools) so there's one place that defines what this looks
+// like, not a copy per caller.
+func (c *Context) String() string {
+	if c == nil {
+		return ""
+	}
+	var parts []string
+	if c.Function != "" {
+		if c.InTest {
+			parts = append(parts, fmt.Sprintf("in %s() (test file)", c.Function))
+		} else {
+			parts = append(parts, fmt.Sprintf("in %s()", c.Function))
+		}
+	} else if c.InTest {
+		parts = append(parts, "(test file)")
+	}
+	if len(c.Arguments) > 0 {
+		parts = append(parts, "args: "+strings.Join(c.Arguments, ", "))
+	}
+	return strings.Join(parts, ", ")
 }
 
 type Finding struct {

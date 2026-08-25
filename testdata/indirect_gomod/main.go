@@ -16,10 +16,12 @@ func wrapper() {
 	keyGen(rand.Reader, 2048)
 }
 
-// Out of scope (documented limitation, needs --deep mode / type info):
-// the concrete RSA implementation is supplied by the caller through the
-// stdlib crypto.Signer interface, so this file has no lexical tie to
-// crypto/rsa at all.
+// Invisible to the default (zero-setup) scan — the concrete RSA
+// implementation is supplied by the caller through the stdlib crypto.Signer
+// interface, so this file has no lexical tie to crypto/rsa at all. Resolved
+// only by the opt-in interface-dispatch heuristic
+// (scanner.WithInterfaceDispatch / cmd/scan -interface-dispatch) — see
+// TestScanDir_Go_InterfaceDispatch, which uses this exact function.
 func useSigner(s crypto.Signer, digest []byte) {
 	s.Sign(rand.Reader, digest, nil)
 }

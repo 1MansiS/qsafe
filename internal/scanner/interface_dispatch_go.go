@@ -8,8 +8,9 @@
 // qsafe.md for the full before/after evidence and false-positive review.
 //
 // Deliberately a heuristic, not sound interprocedural dataflow: no SSA, no
-// callgraph — that's the documented, much more expensive `--deep` mode
-// (ARCHITECTURE.md). Every finding this produces carries
+// callgraph — that's the documented, much more expensive, permanently
+// out-of-scope full interprocedural analysis (ARCHITECTURE.md's "Analysis
+// depth" section). Every finding this produces carries
 // findings.ConfidenceHeuristic, never ConfidenceDirect — see
 // internal/findings/findings.go's doc comment on why that distinction
 // matters before treating this output with the same weight as a direct
@@ -33,6 +34,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 	"gopkg.in/yaml.v3"
@@ -54,18 +56,41 @@ type interfaceRule struct {
 	Implementers     []string `yaml:"implementers"`
 }
 
-var interfaceDispatchRules = mustLoadInterfaceRules()
+// Loaded lazily, not via a package-level var initializer: this file is
+// only ever exercised when WithInterfaceDispatch/-interface-dispatch is
+// actually passed, and a package-level initializer runs unconditionally at
+// package init — a malformed rules file would panic every scan, including
+// plain default ones that never touch this feature, contradicting the
+// documented "opt-in keeps ScanDir's default zero-setup behavior
+// unchanged" guarantee. sync.Once still means the YAML is only parsed
+// once, on first real use.
+var (
+	interfaceDispatchRulesOnce sync.Once
+	interfaceDispatchRules     []interfaceRule
+	interfaceDispatchRulesErr  error
+)
 
-func mustLoadInterfaceRules() []interfaceRule {
-	data, err := interfaceDispatchRulesFS.ReadFile("rules/go/interface_dispatch.yaml")
-	if err != nil {
-		panic(fmt.Sprintf("scanner: reading embedded interface_dispatch.yaml: %v", err))
-	}
+func loadInterfaceDispatchRules() ([]interfaceRule, error) {
+	interfaceDispatchRulesOnce.Do(func() {
+		data, err := interfaceDispatchRulesFS.ReadFile("rules/go/interface_dispatch.yaml")
+		if err != nil {
+			interfaceDispatchRulesErr = fmt.Errorf("reading embedded interface_dispatch.yaml: %w", err)
+			return
+		}
+		interfaceDispatchRules, interfaceDispatchRulesErr = parseInterfaceRules(data)
+	})
+	return interfaceDispatchRules, interfaceDispatchRulesErr
+}
+
+// parseInterfaceRules is the pure parsing step, split out from
+// loadInterfaceDispatchRules' file I/O + caching so a malformed-YAML case
+// can be tested directly without needing to corrupt the real embedded file.
+func parseInterfaceRules(data []byte) ([]interfaceRule, error) {
 	var rules []interfaceRule
 	if err := yaml.Unmarshal(data, &rules); err != nil {
-		panic(fmt.Sprintf("scanner: invalid embedded interface_dispatch.yaml: %v", err))
+		return nil, fmt.Errorf("invalid embedded interface_dispatch.yaml: %w", err)
 	}
-	return rules
+	return rules, nil
 }
 
 // scanGoModuleInterfaceDispatch type-checks root and matches
@@ -75,6 +100,11 @@ func mustLoadInterfaceRules() []interfaceRule {
 // set, which is what keeps this from firing on every interface-typed
 // variable in existence.
 func scanGoModuleInterfaceDispatch(root string, presentPrimitives map[string]bool) ([]findings.Finding, error) {
+	rules, err := loadInterfaceDispatchRules()
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
@@ -97,7 +127,7 @@ func scanGoModuleInterfaceDispatch(root string, presentPrimitives map[string]boo
 				if !ok {
 					return true
 				}
-				for _, rule := range interfaceDispatchRules {
+				for _, rule := range rules {
 					for _, prim := range matchInterfaceRule(pkg, call, rule) {
 						if !presentPrimitives[prim] {
 							continue

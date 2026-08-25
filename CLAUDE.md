@@ -16,7 +16,7 @@ Module path: `github.com/1MansiS/qsafe`
 go build ./...
 go test ./...
 go run ./cmd/scan <dir|https://github.com/...>   # standalone CLI scanner
-go run ./cmd/scan -deep <dir>                     # also runs the interface-dispatch heuristic (needs a buildable module)
+go run ./cmd/scan -interface-dispatch <dir>       # also runs the interface-dispatch heuristic (needs a buildable module)
 go run ./cmd/mcp-server                           # MCP server
 ```
 
@@ -35,7 +35,7 @@ The RAG pipeline (`rag-pipeline/`, Python/FastAPI) is Phase 2 — scoped, docume
 Two rule categories, both under `internal/scanner/rules/go/`, both loaded via `go:embed` (still a single self-contained binary — no runtime dependency on finding the YAML on disk, important for `go install`/MCP distribution):
 
 - **`rules/go/direct/*.yaml`** — import-path + function-name allowlists (e.g. `crypto/rsa` → `GenerateKey`/`SignPKCS1v15`/...). An intentional allowlist per package, not "any call into this package" — see `direct/shor.yaml`'s header comment for the reasoning (a curated list is what lets the tool avoid flagging non-actionable calls like `elliptic.Marshal`).
-- **`rules/go/interface_dispatch.yaml`** — a heuristic for `crypto.Signer`/`crypto.Decrypter` interface dispatch (calls with no lexical tie to a concrete crypto package, or `crypto.Signer`-typed arguments passed into stdlib sinks like `x509.CreateCertificate`). Needs type information (`go/types`/`go/packages`), so it's opt-in (`scanner.WithInterfaceDispatch()` / `cmd/scan -deep`) rather than part of the zero-setup default — it also needs a *buildable* module (resolved deps, Go toolchain), unlike the rest of the scanner.
+- **`rules/go/interface_dispatch.yaml`** — a heuristic for `crypto.Signer`/`crypto.Decrypter` interface dispatch (calls with no lexical tie to a concrete crypto package, or `crypto.Signer`-typed arguments passed into stdlib sinks like `x509.CreateCertificate`). Needs type information (`go/types`/`go/packages`), so it's opt-in (`scanner.WithInterfaceDispatch()` / `cmd/scan -interface-dispatch`) rather than part of the zero-setup default — it also needs a *buildable* module (resolved deps, Go toolchain), unlike the rest of the scanner.
 
 Adding a new primitive or function means editing YAML, not Go code.
 
@@ -55,6 +55,6 @@ Python survives only as offline, maintainer-run ingestion tooling (`rag-pipeline
 
 ## Current State
 
-Go scanner is functional: direct-call detection (RSA/ECDSA/ECDH/ECC, Shor-broken only) plus an opt-in interface-dispatch heuristic, both YAML-rule-driven. Validated against multiple real-world Go repos (see `internal/scanner`'s design notes / commit history for specifics). RAG pipeline is Phase 2, not started. `mcp/tools`/`cmd/mcp-server` currently have a `go.sum` gap (missing entry for `go-sdk`) — `internal/...` and `cmd/scan` build and test cleanly on their own.
+Go scanner is functional: direct-call detection (RSA/ECDSA/ECDH/ECC, Shor-broken only) plus an opt-in interface-dispatch heuristic, both YAML-rule-driven. Validated against multiple real-world Go repos (see `internal/scanner`'s design notes / commit history for specifics). RAG pipeline is Phase 2, not started. `go build ./...` builds clean across the whole repo, including `mcp/tools`/`cmd/mcp-server` (a `go.sum` gap that existed earlier was fixed via `go mod tidy`).
 
 Known, deliberately out-of-scope gaps (tracked, not forgotten): `crypto/ed25519`, `golang.org/x/crypto/curve25519`, `golang.org/x/crypto/ssh`, and the `tls.Certificate.PrivateKey` struct-field pattern (a third interface-dispatch rule `kind` the current schema doesn't have yet).

@@ -77,11 +77,35 @@ func TestScanDir_Go_Context(t *testing.T) {
 	}
 }
 
+// TestScanDir_Go_Indirection_ScopeIsolation is a regression test for a
+// code-review finding: resolveGoVarFuncRefs used to key bindings by bare
+// variable name across the whole file, so an unrelated local `keyGen`
+// (shadowing a package-level crypto-bound `keyGen` with a completely
+// different function value) got misattributed to RSA. See
+// testdata/scoped_indirect_gomod for the exact reproduction.
+func TestScanDir_Go_Indirection_ScopeIsolation(t *testing.T) {
+	s := scanner.New()
+	report, err := s.ScanDir("../../testdata/scoped_indirect_gomod")
+	if err != nil {
+		t.Fatalf("ScanDir: %v", err)
+	}
+	if report.ByPrimitive["RSA"] != 1 {
+		t.Errorf("expected exactly 1 RSA finding (the real, package-level keyGen usage), got ByPrimitive: %v", report.ByPrimitive)
+	}
+	for _, f := range report.Findings {
+		if f.Line == 22 { // keyGen(1, 2) inside unrelated() — must never be flagged
+			t.Errorf("unrelated()'s locally-shadowed keyGen was incorrectly flagged: %+v", f)
+		}
+	}
+}
+
 // TestScanDir_Go_Indirection covers one-hop function-value indirection:
 // `var keyGen = rsa.GenerateKey; keyGen(...)` should still be attributed to
-// RSA. It also documents what stays out of scope: interface-dispatched
-// calls (`s.Sign(...)` on a stdlib crypto.Signer) are not resolved without
-// type information — see ARCHITECTURE.md's `--deep` mode.
+// RSA. It also documents what the *default* (opt-in features off) scan
+// misses: interface-dispatched calls (`s.Sign(...)` on a stdlib
+// crypto.Signer) aren't resolved without type information — that's a
+// separate, opt-in heuristic (TestScanDir_Go_InterfaceDispatch), not
+// something the zero-setup default does.
 func TestScanDir_Go_Indirection(t *testing.T) {
 	s := scanner.New()
 	report, err := s.ScanDir("../../testdata/indirect_gomod")

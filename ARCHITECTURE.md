@@ -528,18 +528,22 @@ per-call-site context that shipped instead.
 
 qsafe intentionally does **not** do full interprocedural analysis (SSA +
 class hierarchy/call-graph analysis across a module's whole transitive
-dependency closure). That's a permanent scope boundary, not a `--deep`
-flag deferred to later — see `qsafe.md`'s design notes for the full
-reasoning, in short: the cost (SSA + CHA over a module's full dependency
-closure runs ~2–5× the transitive closure in memory — ~10–15 GB observed
-at Vault/go-ethereum scale) isn't worth it against a lighter alternative
-that was actually built and validated instead.
+dependency closure). That's a permanent scope boundary, not a flag
+deferred to later (an earlier draft of this design called this "`--deep`
+mode" — that name and the feature it described were both dropped; don't
+confuse it with the opt-in interface-dispatch flag below, which is a
+different, much lighter feature and deliberately not named `-deep` to
+avoid exactly that confusion) — see `qsafe.md`'s design notes for the
+full reasoning, in short: the cost (SSA + CHA over a module's full
+dependency closure runs ~2–5× the transitive closure in memory — ~10–15 GB
+observed at Vault/go-ethereum scale) isn't worth it against a lighter
+alternative that was actually built and validated instead.
 
 **What's actually implemented, two tiers:**
 1. **Direct calls** (default, always on) — `go/parser` + `go/ast`, one
    file at a time, O(1) memory. `rsa.GenerateKey(...)`, one-hop
    function-variable indirection (`fn := rsa.GenerateKey; fn(...)`).
-2. **Interface dispatch** (opt-in — `WithInterfaceDispatch`/`-deep`) —
+2. **Interface dispatch** (opt-in — `WithInterfaceDispatch`/`-interface-dispatch`) —
    `go/types`/`go/packages`, needs a buildable module. A heuristic, not
    sound dataflow: attributes `crypto.Signer`/`crypto.Decrypter` call
    sites (including ones buried inside stdlib sinks like

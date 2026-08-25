@@ -51,14 +51,30 @@ type varFuncRef struct {
 	importPath string // for severity lookup back into goRulesByImport
 }
 
+// varFuncKey scopes a varFuncRef binding to the function it was declared
+// in ("" for package-level), so a local variable in one function can never
+// match a call to a same-named-but-unrelated variable in a different
+// function — see the bug this fixes: a bare-name-only map let
+// `keyGen := add` in an unrelated function get misattributed to whatever
+// crypto primitive some other `keyGen` happened to be bound to elsewhere
+// in the file.
+type varFuncKey struct {
+	scope string // enclosing function name, "" for package scope
+	name  string
+}
+
 // scanGoFile parses one Go file and returns findings based on import-alias
 // tracking: for each call X.Fn(...) where X is a local alias for a crypto
 // import, emit a finding. It also resolves one hop of indirection — a
 // variable assigned a crypto function value directly (`fn := rsa.GenerateKey`)
 // and later invoked as `fn(...)` — by pre-scanning assignments before
-// walking calls. No type checking or dependency loading required, so deeper
-// indirection (interface dispatch, multi-hop reassignment) is out of scope;
-// see ARCHITECTURE.md's `--deep` mode.
+// walking calls, scoped to the enclosing function the same way Go's own
+// shadowing rules work (a local binding is only visible within its own
+// function; package-level bindings are visible everywhere unless shadowed).
+// No type checking or dependency loading required, so deeper indirection
+// (interface dispatch is a separate, opt-in heuristic — see
+// interface_dispatch_go.go; multi-hop reassignment stays out of scope) —
+// see ARCHITECTURE.md's "Analysis depth" section.
 func scanGoFile(path string) ([]findings.Finding, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
@@ -84,6 +100,7 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 	// Package-level `var` decls can lexically appear after their use within
 	// the same file, so this must run as a separate pass before the call walk.
 	varFuncs := resolveGoVarFuncRefs(f, imports)
+	locallyShadowed := collectLocalDecls(f)
 
 	var fs []findings.Finding
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -118,7 +135,19 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 			prim = rule.Primitive
 
 		case *ast.Ident:
-			ref, ok := varFuncs[fun.Name]
+			callScope, _ := enclosingFuncName(f, call.Pos())
+			ref, ok := varFuncs[varFuncKey{callScope, fun.Name}]
+			if !ok {
+				if locallyShadowed[varFuncKey{callScope, fun.Name}] {
+					// A local declaration of this name exists in this scope
+					// but isn't itself crypto-bound (e.g. `keyGen := add`) —
+					// it still shadows any package-level binding of the same
+					// name, the same way Go's own scoping works. Must not
+					// fall through to the package-level match below.
+					return true
+				}
+				ref, ok = varFuncs[varFuncKey{"", fun.Name}] // fall back to a genuine package-level binding
+			}
 			if !ok {
 				return true
 			}
@@ -149,11 +178,13 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 
 // resolveGoVarFuncRefs walks the whole file for `var name = pkg.Fn` and
 // `name := pkg.Fn` assignments — a bare selector RHS (no call parens) where
-// pkg is a known crypto import alias — and returns name → resolved primitive.
-func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[string]varFuncRef {
-	refs := make(map[string]varFuncRef)
+// pkg is a known crypto import alias — and returns each binding keyed by
+// (enclosing function, name), so lookups at the call site can only match
+// within the same scope (or fall back to a genuine package-level binding).
+func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[varFuncKey]varFuncRef {
+	refs := make(map[varFuncKey]varFuncRef)
 
-	resolve := func(lhsName string, rhs ast.Expr) {
+	resolve := func(lhsName string, rhs ast.Expr, declPos token.Pos) {
 		sel, ok := rhs.(*ast.SelectorExpr)
 		if !ok {
 			return
@@ -175,7 +206,8 @@ func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[string]var
 		if !ok {
 			return
 		}
-		refs[lhsName] = varFuncRef{
+		scope, _ := enclosingFuncName(f, declPos) // "" if this is a package-level declaration
+		refs[varFuncKey{scope, lhsName}] = varFuncRef{
 			primitive:  rule.Primitive,
 			usage:      usage,
 			via:        ident.Name + "." + fn,
@@ -185,24 +217,73 @@ func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[string]var
 
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch node := n.(type) {
-		case *ast.ValueSpec: // var name = pkg.Fn
+		case *ast.ValueSpec: // var name = pkg.Fn — package-level or local
 			for i, name := range node.Names {
 				if i < len(node.Values) {
-					resolve(name.Name, node.Values[i])
+					resolve(name.Name, node.Values[i], node.Pos())
 				}
 			}
-		case *ast.AssignStmt: // name := pkg.Fn  or  name = pkg.Fn
+		case *ast.AssignStmt: // name := pkg.Fn  or  name = pkg.Fn — always local
 			for i, lhs := range node.Lhs {
 				if i >= len(node.Rhs) {
 					continue
 				}
 				if ident, ok := lhs.(*ast.Ident); ok {
-					resolve(ident.Name, node.Rhs[i])
+					resolve(ident.Name, node.Rhs[i], node.Pos())
 				}
 			}
 		}
 		return true
 	})
 	return refs
+}
+
+// collectLocalDecls returns every (scope, name) pair declared locally
+// anywhere in f — via `:=`, `var` (with or without an initializer), or as a
+// function parameter — regardless of whether that declaration resolves to
+// a tracked crypto binding. This is what lets the lookup in scanGoFile tell
+// "no local binding at all, safe to fall back to package scope" apart from
+// "there IS a local binding here, it's just not a crypto one" — the second
+// case must still block the fallback, the same way Go's own shadowing
+// rules work: once a name is redeclared locally, the outer one is never
+// visible in that scope again, regardless of what the local one holds.
+func collectLocalDecls(f *ast.File) map[varFuncKey]bool {
+	shadowed := make(map[varFuncKey]bool)
+	mark := func(name string, pos token.Pos) {
+		if scope, ok := enclosingFuncName(f, pos); ok {
+			shadowed[varFuncKey{scope, name}] = true
+		}
+	}
+
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ValueSpec:
+			for _, name := range node.Names {
+				mark(name.Name, node.Pos())
+			}
+		case *ast.AssignStmt:
+			if node.Tok == token.DEFINE {
+				for _, lhs := range node.Lhs {
+					if ident, ok := lhs.(*ast.Ident); ok {
+						mark(ident.Name, node.Pos())
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			// enclosingFuncName matches on the *body's* position range, so
+			// parameters (which sit before the body starts) need to be
+			// marked using a position inside the body, not the FuncDecl's
+			// own Pos() (the "func" keyword) — that would never match.
+			if node.Body != nil && node.Type.Params != nil {
+				for _, field := range node.Type.Params.List {
+					for _, name := range field.Names {
+						mark(name.Name, node.Body.Pos())
+					}
+				}
+			}
+		}
+		return true
+	})
+	return shadowed
 }
 

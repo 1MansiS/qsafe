@@ -39,8 +39,14 @@ func formatFindings(path string, fs *findings.FindingSet) string {
 
 	for _, f := range fs.Findings {
 		fmt.Fprintf(&sb, "\n  [%s] %s (%s) — line %d", strings.ToUpper(string(f.Severity)), f.Primitive, f.Usage, f.Line)
+		if f.Confidence == findings.ConfidenceHeuristic {
+			fmt.Fprintf(&sb, "  [heuristic — see detail]")
+		}
 		if f.Detail != "" {
 			fmt.Fprintf(&sb, "\n    %s", f.Detail)
+		}
+		if f.Context != nil {
+			fmt.Fprintf(&sb, "\n    context: %s (pass function/in_test/arguments to explain_finding or suggest_migration for richer grounding)", f.Context.String())
 		}
 	}
 
