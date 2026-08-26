@@ -41,6 +41,39 @@ func TestScanDir_Go(t *testing.T) {
 	}
 }
 
+// TestScanDir_Go_MultiPrimitivePerImport is a regression test for
+// goRulesByImport holding a slice per import, not a single rule: crypto/x509
+// has both x509.ParsePKCS1PrivateKey (RSA) and x509.ParseECPrivateKey
+// (ECDSA), algorithm-specific by DER format rather than by package. Before
+// the fix, the second-loaded rule silently overwrote the first in the map
+// (both share `import: crypto/x509`), so one of the two functions'
+// primitive would resolve wrong or not at all.
+func TestScanDir_Go_MultiPrimitivePerImport(t *testing.T) {
+	s := scanner.New()
+	report, err := s.ScanDir("../../testdata/gomod")
+	if err != nil {
+		t.Fatalf("ScanDir: %v", err)
+	}
+	var gotRSA, gotECDSA bool
+	for _, f := range report.Findings {
+		if f.Context == nil || f.Context.Function != "useX509ParsePrivateKeys" {
+			continue
+		}
+		switch f.Primitive {
+		case "RSA":
+			gotRSA = true
+		case "ECDSA":
+			gotECDSA = true
+		}
+	}
+	if !gotRSA {
+		t.Errorf("expected x509.ParsePKCS1PrivateKey to resolve to RSA, got: %v", report.Findings)
+	}
+	if !gotECDSA {
+		t.Errorf("expected x509.ParseECPrivateKey to resolve to ECDSA, got: %v", report.Findings)
+	}
+}
+
 // TestScanDir_Go_Context covers per-call-site Context — enclosing function
 // name and literal argument text, extracted by the same walk that already
 // produces the finding. testdata/gomod/main.go's useRSA() is:
@@ -58,7 +91,11 @@ func TestScanDir_Go_Context(t *testing.T) {
 
 	var rsaFinding *findings.Finding
 	for i, f := range report.Findings {
-		if f.Primitive == "RSA" {
+		// Matched by enclosing function, not just Primitive=="RSA": this
+		// fixture now has more than one RSA finding (useX509ParsePrivateKeys
+		// also resolves to RSA), so the first-match-wins loop from before
+		// would silently grab the wrong one.
+		if f.Primitive == "RSA" && f.Context != nil && f.Context.Function == "useRSA" {
 			rsaFinding = &report.Findings[i]
 		}
 	}

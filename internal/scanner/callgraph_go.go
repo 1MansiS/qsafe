@@ -50,7 +50,8 @@ type varFuncRef struct {
 	primitive  string
 	usage      string
 	via        string // e.g. "rsa.GenerateKey" — the original selector, for Detail text
-	importPath string // for severity lookup back into goRulesByImport
+	importPath string // kept for Detail/debugging; severity is captured directly below
+	severity   string // captured at resolution time, since goRulesByImport can hold more than one rule per import (see its doc comment) and a bare importPath lookup can't disambiguate which one this binding came from
 }
 
 // varFuncKey scopes a varFuncRef binding to the *block* it was declared in
@@ -137,8 +138,8 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 
 		var fn, prim, usage string
 		var detail string
+		var sevStr string
 
-		var rule goRule
 		switch fun := call.Fun.(type) {
 		case *ast.SelectorExpr:
 			ident, ok := fun.X.(*ast.Ident)
@@ -149,16 +150,14 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 			if !ok {
 				return true
 			}
-			rule, ok = goRulesByImport[importPath]
-			if !ok {
-				return true
-			}
 			fn = fun.Sel.Name
-			usage, ok = rule.Functions[fn] // allowlist: unlisted functions in a
-			if !ok {                       // known-crypto package are not findings
+			rule, ok := findGoRule(importPath, fn) // allowlist: unlisted functions in a
+			if !ok {                               // known-crypto package are not findings
 				return true
 			}
+			usage = rule.Functions[fn]
 			prim = rule.Primitive
+			sevStr = rule.Severity
 
 		case *ast.Ident:
 			// Walk the real scope chain outward, innermost block first,
@@ -185,13 +184,13 @@ func scanGoFile(path string) ([]findings.Finding, error) {
 			}
 			prim, usage = ref.primitive, ref.usage
 			detail = "indirect: " + fun.Name + " = " + ref.via
-			rule = goRulesByImport[ref.importPath]
+			sevStr = ref.severity
 
 		default:
 			return true
 		}
 
-		sev, _ := severityFromString(rule.Severity)
+		sev, _ := severityFromString(sevStr)
 		pos := fset.Position(call.Pos())
 		fs = append(fs, findings.Finding{
 			Primitive:  prim,
@@ -229,20 +228,17 @@ func resolveGoVarFuncRefs(f *ast.File, imports map[string]string) map[varFuncKey
 		if !ok {
 			return
 		}
-		rule, ok := goRulesByImport[importPath]
-		if !ok {
-			return
-		}
 		fn := sel.Sel.Name
-		usage, ok := rule.Functions[fn] // same allowlist as the direct-call path
+		rule, ok := findGoRule(importPath, fn) // same allowlist as the direct-call path
 		if !ok {
 			return
 		}
 		refs[varFuncKey{declaringScope(f, declPos), lhsName}] = varFuncRef{
 			primitive:  rule.Primitive,
-			usage:      usage,
+			usage:      rule.Functions[fn],
 			via:        ident.Name + "." + fn,
 			importPath: importPath,
+			severity:   rule.Severity,
 		}
 	}
 
@@ -320,4 +316,3 @@ func collectLocalDecls(f *ast.File) map[varFuncKey]bool {
 	})
 	return shadowed
 }
-

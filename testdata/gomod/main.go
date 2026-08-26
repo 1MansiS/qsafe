@@ -10,6 +10,7 @@ import (
 	"crypto/rc4"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/x509"
 
 	"golang.org/x/crypto/curve25519"
 )
@@ -33,6 +34,15 @@ func useED25519() {
 func useX25519() {
 	var scalar, point [32]byte
 	curve25519.X25519(scalar[:], point[:])
+}
+
+// Regression fixture: crypto/x509 holds functions for two different
+// primitives (ParsePKCS1PrivateKey is RSA, ParseECPrivateKey is ECDSA) —
+// confirms goRulesByImport's per-import slice correctly disambiguates
+// between them instead of one overwriting the other.
+func useX509ParsePrivateKeys(der []byte) {
+	x509.ParsePKCS1PrivateKey(der)
+	x509.ParseECPrivateKey(der)
 }
 
 func use3DES() {
@@ -65,6 +75,7 @@ func main() {
 	useECDSA()
 	useED25519()
 	useX25519()
+	useX509ParsePrivateKeys(nil)
 	use3DES()
 	useDES()
 	useRC4()

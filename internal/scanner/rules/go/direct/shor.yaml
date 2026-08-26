@@ -26,9 +26,16 @@
 # migration_map.yaml row (ECDH/key_generation → ML-KEM) covers both,
 # instead of a duplicate entry with identical guidance.
 #
-# Known gaps, not yet covered — needs its own `go doc` pass before rules
-# get written, not a guess:
-#   - golang.org/x/crypto/ssh (uses RSA/ECDSA/ed25519 for host/user keys)
+# crypto/x509.ParsePKCS1PrivateKey/ParseECPrivateKey (below) share their
+# import path with nothing else in this file, but are still algorithm-
+# specific by DER format (PKCS1 is RSA-only, SEC1 EC is ECDSA-only) — same
+# "call site alone identifies the algorithm" bar as everything else here,
+# just via a parsing format instead of a package name. This is why
+# goRulesByImport (rules.go) holds a slice per import, not one rule: two
+# separate blocks below share `import: crypto/x509`, one per primitive.
+# x509.MarshalECPrivateKey/MarshalPKCS1PrivateKey deliberately excluded —
+# encodes an already-flagged key, same reasoning as crypto/elliptic's
+# Marshal exclusion above, not a new signal.
 
 - primitive: RSA
   import: crypto/rsa
@@ -115,3 +122,17 @@
     Sign: signing
     Verify: signing
     VerifyWithOptions: signing
+
+- primitive: RSA
+  import: crypto/x509
+  category: shor
+  severity: high
+  functions:
+    ParsePKCS1PrivateKey: key_generation
+
+- primitive: ECDSA
+  import: crypto/x509
+  category: shor
+  severity: high
+  functions:
+    ParseECPrivateKey: key_generation

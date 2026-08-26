@@ -30,13 +30,18 @@ type goRule struct {
 }
 
 // loaded once at package init from the embedded YAML, indexed by import
-// path for O(1) lookup during the AST walk. A single self-contained binary
-// still results — go:embed compiles the rule files in, no runtime
-// dependency on finding them on disk (important for `go install`/MCP
-// server distribution, where the binary may end up far from its source tree).
+// path for O(1) lookup during the AST walk. A slice per import, not a
+// single rule, because one package can hold functions for more than one
+// primitive — e.g. crypto/x509.ParsePKCS1PrivateKey is unambiguously RSA
+// (PKCS1 is an RSA-only format) while crypto/x509.ParseECPrivateKey is
+// unambiguously ECDSA (SEC1 EC format), both in the same package. A single
+// self-contained binary still results — go:embed compiles the rule files
+// in, no runtime dependency on finding them on disk (important for
+// `go install`/MCP server distribution, where the binary may end up far
+// from its source tree).
 var goRulesByImport = mustLoadGoRules()
 
-func mustLoadGoRules() map[string]goRule {
+func mustLoadGoRules() map[string][]goRule {
 	rules, err := loadGoRules(goRulesFS)
 	if err != nil {
 		// Embedded, author-controlled config — a load failure here is a
@@ -47,13 +52,13 @@ func mustLoadGoRules() map[string]goRule {
 	return rules
 }
 
-func loadGoRules(fsys embed.FS) (map[string]goRule, error) {
+func loadGoRules(fsys embed.FS) (map[string][]goRule, error) {
 	matches, err := fsys.ReadDir("rules/go/direct")
 	if err != nil {
 		return nil, err
 	}
 
-	byImport := make(map[string]goRule)
+	byImport := make(map[string][]goRule)
 	for _, entry := range matches {
 		data, err := fsys.ReadFile("rules/go/direct/" + entry.Name())
 		if err != nil {
@@ -70,10 +75,23 @@ func loadGoRules(fsys embed.FS) (map[string]goRule, error) {
 			if _, ok := severityFromString(r.Severity); !ok {
 				return nil, fmt.Errorf("%s: rule %s has invalid severity %q", entry.Name(), r.Primitive, r.Severity)
 			}
-			byImport[r.Import] = r
+			byImport[r.Import] = append(byImport[r.Import], r)
 		}
 	}
 	return byImport, nil
+}
+
+// findGoRule returns the rule block registered for importPath whose
+// Functions allowlist contains fn, trying each block in declaration order
+// (there's normally exactly one; see goRulesByImport's doc comment for why
+// there can be more).
+func findGoRule(importPath, fn string) (goRule, bool) {
+	for _, r := range goRulesByImport[importPath] {
+		if _, ok := r.Functions[fn]; ok {
+			return r, true
+		}
+	}
+	return goRule{}, false
 }
 
 func severityFromString(s string) (findings.Severity, bool) {

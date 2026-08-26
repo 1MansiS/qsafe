@@ -170,6 +170,14 @@
   usage: signing
   implementers: [ED25519]
 
+- kind: argument
+  func: golang.org/x/crypto/acme.WithKey
+  arg_index: 0
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA, ED25519]
+
 # Deliberately not included: crypto/tls.Certificate.PrivateKey assigned via
 # a plain assignment statement (cert.PrivateKey = key) rather than a
 # composite literal — the struct_field kind above only matches keyed
