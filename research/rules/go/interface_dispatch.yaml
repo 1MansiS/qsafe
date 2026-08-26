@@ -12,7 +12,7 @@
 #     method calls happen *inside the standard library's own
 #     implementation* (e.g. x509.CreateCertificate calls signer.Sign()
 #     internally) — structurally invisible to any source-level analysis
-#     otherwise. See qsafe.md, smallstep/certificates finding, 2026-08-24.
+#     otherwise (confirmed against smallstep/certificates).
 #
 # `implementers` is fixed domain knowledge (which of our tracked
 # primitives' key types are known to implement this interface), not
@@ -67,7 +67,7 @@
   usage: signing
   implementers: [RSA, ECDSA]
 
-# Deliberately not included yet, see qsafe.md for why:
+# Deliberately not included yet:
 #   - crypto/x509.Certificate.CreateCRL — deprecated, and a method call on
 #     an arbitrary local receiver rather than a package-qualified function,
 #     doesn't fit the `func:` matching shape here.

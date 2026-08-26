@@ -10,16 +10,19 @@ import (
 )
 
 // TestScanDir_Go covers the Shor-broken-only scope (see rules/go/shor.yaml):
-// RSA/ECDSA/ECC should be found; testdata/gomod/main.go deliberately also
-// contains 3DES/DES/RC4/MD5/SHA-1 to confirm they're correctly *excluded*
-// now that the tool's scope is PQC migration, not general crypto hygiene.
+// RSA/ECDSA/ECC/ED25519/ECDH should be found; testdata/gomod/main.go
+// deliberately also contains 3DES/DES/RC4/MD5/SHA-1 to confirm they're
+// correctly *excluded* now that the tool's scope is PQC migration, not
+// general crypto hygiene. The ECDH finding here comes from
+// golang.org/x/crypto/curve25519.X25519, not crypto/ecdh — confirms the
+// two packages fold into one primitive, see shor.yaml's header comment.
 func TestScanDir_Go(t *testing.T) {
 	s := scanner.New()
 	report, err := s.ScanDir("../../testdata/gomod")
 	if err != nil {
 		t.Fatalf("ScanDir: %v", err)
 	}
-	want := []string{"RSA", "ECDSA", "ECC"}
+	want := []string{"RSA", "ECDSA", "ECC", "ED25519", "ECDH"}
 	for _, prim := range want {
 		if report.ByPrimitive[prim] == 0 {
 			t.Errorf("expected primitive %q in report, got ByPrimitive: %v", prim, report.ByPrimitive)
@@ -168,6 +171,37 @@ func TestScanDir_Go_InterfaceDispatch(t *testing.T) {
 	}
 	if !strings.Contains(got.Detail, "heuristic:") {
 		t.Errorf("expected Detail to flag this as heuristic, got %q", got.Detail)
+	}
+}
+
+// TestScanDir_Go_InterfaceDispatch_StructField covers the struct_field rule
+// kind (crypto/tls.Certificate.PrivateKey) and an argument-kind rule
+// matched against a method on an arbitrary local receiver
+// (crypto/x509.Certificate.CreateCRL) — see testdata/structfield_gomod.
+// Expects exactly 2 heuristic findings: one per fixture function.
+func TestScanDir_Go_InterfaceDispatch_StructField(t *testing.T) {
+	s := scanner.New()
+	report, err := s.ScanDir("../../testdata/structfield_gomod", scanner.WithInterfaceDispatch())
+	if err != nil {
+		t.Fatalf("ScanDir: %v", err)
+	}
+
+	var heuristic []findings.Finding
+	for _, f := range report.Findings {
+		if f.Confidence == findings.ConfidenceHeuristic {
+			heuristic = append(heuristic, f)
+		}
+	}
+	if len(heuristic) != 2 {
+		t.Fatalf("expected 2 heuristic findings (struct_field + CreateCRL argument), got %d: %v", len(heuristic), heuristic)
+	}
+	for _, f := range heuristic {
+		if f.Primitive != "RSA" {
+			t.Errorf("expected RSA (the only primitive constructed in this module), got %q", f.Primitive)
+		}
+		if !strings.Contains(f.Detail, "heuristic:") {
+			t.Errorf("expected Detail to flag this as heuristic, got %q", f.Detail)
+		}
 	}
 }
 

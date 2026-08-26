@@ -1,13 +1,13 @@
-# Shor-broken Go crypto detection rules — RSA/ECDSA/ECDH/ECC only.
+# Shor-broken Go crypto detection rules — RSA/ECDSA/ECDH/ECC/ED25519 only.
 #
 # qsafe is a PQC migration advisor: its scope is primitives Shor's algorithm
 # actually breaks (factoring, discrete log). MD5/SHA-1/DES/3DES/RC4 are real
 # crypto hygiene issues but not quantum-migration relevant, and were removed
-# from scope — see qsafe.md notes, "PQC Migration Advisor scope" decision.
+# from scope.
 #
 # Each rule's `functions` map is an intentional allowlist, not "every call
 # into this package". Two lessons baked in from the tree-sitter-go research
-# spike (see qsafe.md, 2026-08-23/24), applied here for the first time to
+# spike (see research/README.md), applied here for the first time to
 # the real (non-spike) scanner:
 #   1. Only include a function if the call site alone — no cross-call
 #      data-flow tracing — is enough to (a) identify the algorithm and
@@ -19,11 +19,15 @@
 #      actionable finding — a separate finding here would be redundant
 #      noise once RAG-generated migration guidance is attached to it.
 #
-# Known gaps, not yet covered (see qsafe.md "Rule coverage gaps" — each
-# needs its own `go doc` pass before rules get written, not a guess):
-#   - crypto/ed25519 (stdlib, Go 1.13+)
-#   - golang.org/x/crypto/curve25519 (X25519) — confirmed real & total
-#     gap via wireguard-go (0/0 findings from both engines)
+# golang.org/x/crypto/curve25519 is tagged primitive ECDH, not a separate
+# X25519 primitive — it's the same elliptic-curve key exchange as
+# crypto/ecdh's X25519() curve constant, just via the pre-crypto/ecdh
+# low-level package. Folding them under one primitive name means one
+# migration_map.yaml row (ECDH/key_generation → ML-KEM) covers both,
+# instead of a duplicate entry with identical guidance.
+#
+# Known gaps, not yet covered — needs its own `go doc` pass before rules
+# get written, not a guess:
 #   - golang.org/x/crypto/ssh (uses RSA/ECDSA/ed25519 for host/user keys)
 
 - primitive: RSA
@@ -80,3 +84,34 @@
     # Marshal, Unmarshal, MarshalCompressed, UnmarshalCompressed,
     # ScalarMult, ScalarBaseMult, IsOnCurve, Params — deliberately
     # excluded, see header comment.
+
+- primitive: ECDH
+  import: golang.org/x/crypto/curve25519
+  category: shor
+  severity: high
+  functions:
+    # This package predates crypto/ecdh (added Go 1.20) and has no
+    # GenerateKey call of its own — callers generate/clamp the private
+    # scalar themselves, then call X25519 (or the deprecated
+    # ScalarMult/ScalarBaseMult) to do the actual point multiplication,
+    # for both key generation (point = Basepoint) and the shared-secret
+    # step. Unlike crypto/elliptic's ScalarMult, the curve here isn't a
+    # parameter — the whole package is Curve25519 — so the call site
+    # alone is the identifying signal, not just co-located noise.
+    X25519: key_generation
+    ScalarMult: key_generation
+    ScalarBaseMult: key_generation
+
+- primitive: ED25519
+  import: crypto/ed25519
+  category: shor
+  severity: high
+  functions:
+    # Ed25519 (EdDSA) is unambiguously signing-only — a different
+    # algorithm from X25519, not a dual-use primitive, despite sharing
+    # Curve25519 (see CLAUDE.md's migration_map design note).
+    GenerateKey: key_generation
+    NewKeyFromSeed: key_generation
+    Sign: signing
+    Verify: signing
+    VerifyWithOptions: signing

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-**qsafe** is a PQC (Post-Quantum Cryptography) Migration Advisor. It scans Go codebases for **Shor-broken** cryptographic primitives (RSA, ECDSA, ECDH, ECC — the ones Shor's algorithm actually breaks, not general crypto hygiene issues like MD5/SHA-1) and uses RAG over NIST PQC standards (FIPS 203/204/205, CNSA 2.0) to generate concrete, spec-grounded migration guidance. The primary interface is an **MCP server** consumed by Claude, Cursor, or any MCP-compatible host.
+**qsafe** is a PQC (Post-Quantum Cryptography) Migration Advisor. It scans Go codebases for **Shor-broken** cryptographic primitives (RSA, ECDSA, ECDH, ECC, ED25519 — the ones Shor's algorithm actually breaks, not general crypto hygiene issues like MD5/SHA-1) and uses RAG over NIST PQC standards (FIPS 203/204/205, CNSA 2.0) to generate concrete, spec-grounded migration guidance. The primary interface is an **MCP server** consumed by Claude, Cursor, or any MCP-compatible host.
 
 Module path: `github.com/1MansiS/qsafe`
 
@@ -35,7 +35,7 @@ The RAG pipeline (`rag-pipeline/`, Python/FastAPI) is Phase 2 — scoped, docume
 Two rule categories, both under `internal/scanner/rules/go/`, both loaded via `go:embed` (still a single self-contained binary — no runtime dependency on finding the YAML on disk, important for `go install`/MCP distribution):
 
 - **`rules/go/direct/*.yaml`** — import-path + function-name allowlists (e.g. `crypto/rsa` → `GenerateKey`/`SignPKCS1v15`/...). An intentional allowlist per package, not "any call into this package" — see `direct/shor.yaml`'s header comment for the reasoning (a curated list is what lets the tool avoid flagging non-actionable calls like `elliptic.Marshal`).
-- **`rules/go/interface_dispatch.yaml`** — a heuristic for `crypto.Signer`/`crypto.Decrypter` interface dispatch (calls with no lexical tie to a concrete crypto package, or `crypto.Signer`-typed arguments passed into stdlib sinks like `x509.CreateCertificate`). Needs type information (`go/types`/`go/packages`), so it's opt-in (`scanner.WithInterfaceDispatch()` / `cmd/scan -interface-dispatch`) rather than part of the zero-setup default — it also needs a *buildable* module (resolved deps, Go toolchain), unlike the rest of the scanner.
+- **`rules/go/interface_dispatch.yaml`** — a heuristic for `crypto.Signer`/`crypto.Decrypter` interface dispatch, in three rule `kind`s: `receiver` (calls with no lexical tie to a concrete crypto package), `argument` (a concrete or interface-typed argument passed into a sink function/method, e.g. `crypto.Signer`-typed arguments into `x509.CreateCertificate`, or `golang.org/x/crypto/ssh.NewSignerFromKey`'s `interface{}` parameter matched against concrete key types), and `struct_field` (a concrete-typed value set on a config struct's field, e.g. `crypto/tls.Certificate{PrivateKey: ...}`). Needs type information (`go/types`/`go/packages`), so it's opt-in (`scanner.WithInterfaceDispatch()` / `cmd/scan -interface-dispatch`) rather than part of the zero-setup default — it also needs a *buildable* module (resolved deps, Go toolchain), unlike the rest of the scanner.
 
 Adding a new primitive or function means editing YAML, not Go code.
 
@@ -55,6 +55,4 @@ Python survives only as offline, maintainer-run ingestion tooling (`rag-pipeline
 
 ## Current State
 
-Go scanner is functional: direct-call detection (RSA/ECDSA/ECDH/ECC, Shor-broken only) plus an opt-in interface-dispatch heuristic, both YAML-rule-driven. Validated against multiple real-world Go repos (see `internal/scanner`'s design notes / commit history for specifics). RAG pipeline is Phase 2, not started. `go build ./...` builds clean across the whole repo, including `mcp/tools`/`cmd/mcp-server` (a `go.sum` gap that existed earlier was fixed via `go mod tidy`).
-
-Known, deliberately out-of-scope gaps (tracked, not forgotten): `crypto/ed25519`, `golang.org/x/crypto/curve25519`, `golang.org/x/crypto/ssh`, and the `tls.Certificate.PrivateKey` struct-field pattern (a third interface-dispatch rule `kind` the current schema doesn't have yet).
+Go scanner is functional: direct-call detection (RSA/ECDSA/ECDH/ECC/ED25519, Shor-broken only, including `golang.org/x/crypto/curve25519`'s X25519 folded under the ECDH primitive) plus an opt-in interface-dispatch heuristic (three rule kinds: `receiver`, `argument`, `struct_field`; the last covers `crypto/tls.Certificate.PrivateKey`, and `argument` also covers `golang.org/x/crypto/ssh`'s `NewSignerFromSigner`/`NewSignerFromKey`), both YAML-rule-driven. Validated against multiple real-world Go repos (see `internal/scanner`'s design notes / commit history for specifics). RAG pipeline is Phase 2, not started. `go build ./...` builds clean across the whole repo, including `mcp/tools`/`cmd/mcp-server` (a `go.sum` gap that existed earlier was fixed via `go mod tidy`).

@@ -1,33 +1,57 @@
 # Interface-dispatch rules — see internal/scanner/interface_dispatch_go.go.
-# Validated as research/internal/detect/go_types.go before graduating here
-# (2026-08-24); qsafe.md has the full before/after evidence across 5 real
-# repos. Two `kind`s of rule, both needing type info to match — neither is
-# expressible as a plain import/function allowlist:
+# Validated as research/internal/detect/go_types.go before graduating here,
+# checked against real repos (cfssl, boulder, vault, caddy, smallstep/certificates,
+# wireguard-go, gliderlabs/ssh). Three `kind`s of rule, all needing type info
+# to match — none is expressible as a plain import/function allowlist:
 #
 #   receiver — x.Method(...) where x's static type is the named interface.
 #     e.g. `s.Sign(...)` where s is typed crypto.Signer, no lexical tie to
 #     any concrete crypto package in this file.
 #
 #   argument — a call to a known function/method where one argument's
-#     static type is the named interface. Needed because some interface
-#     method calls happen *inside the standard library's own
-#     implementation* (e.g. x509.CreateCertificate calls signer.Sign()
-#     internally) — structurally invisible to any source-level analysis
-#     otherwise. See qsafe.md, smallstep/certificates finding, 2026-08-24.
+#     static type is the named type. Two distinct reasons this is needed,
+#     both handled the same way:
+#       1. Some interface method calls happen *inside the standard
+#          library's own implementation* (e.g. x509.CreateCertificate calls
+#          signer.Sign() internally) — structurally invisible to any
+#          source-level analysis otherwise (confirmed against
+#          smallstep/certificates).
+#       2. Some functions take `interface{}` (e.g.
+#          golang.org/x/crypto/ssh.NewSignerFromKey) rather than a named
+#          interface — go/types still resolves the *argument expression's
+#          own* static type at the call site regardless of the parameter's
+#          declared type, so matching against a concrete type
+#          (crypto/rsa.PrivateKey, not an interface at all) works the same
+#          way. `func:` is resolved via go/types object identity, so it
+#          matches methods on arbitrary local receivers too, not just
+#          package-level functions (confirmed: crypto/x509.CreateCRL,
+#          a method on *x509.Certificate, resolves the same as a
+#          package-level function would).
+#
+#   struct_field — a composite literal (or &-of-one) whose type is the
+#     named struct, setting `field` to a value whose own static type is a
+#     concrete `value_package`/`value_name`. Needed for config-style structs
+#     like crypto/tls.Certificate, where the interesting assignment isn't a
+#     function call at all: `tls.Certificate{PrivateKey: myRSAKey}`. Only
+#     the keyed literal form is matched (`Field: value`), not positional
+#     literals — same "call site alone must be self-evident" policy as the
+#     rest of this file.
 #
 # `implementers` is fixed domain knowledge (which of our tracked
-# primitives' key types are known to implement this interface), not
-# computed — same role as rules/go/shor.yaml's per-function usage labels.
-# A finding only fires if the module *also* directly constructs one of the
-# listed primitives elsewhere (see GoTypesDetector) — that's what keeps
-# this from firing on every interface-typed variable in existence.
+# primitives' key types are known to implement this interface, or in the
+# argument/struct_field concrete-type case, which single primitive a given
+# concrete type IS), not computed — same role as rules/go/shor.yaml's
+# per-function usage labels. A finding only fires if the module *also*
+# directly constructs one of the listed primitives elsewhere (see
+# GoTypesDetector) — that's what keeps this from firing on every
+# interface-typed variable in existence.
 
 - kind: receiver
   interface_package: crypto
   interface_name: Signer
   method: Sign
   usage: signing
-  implementers: [RSA, ECDSA]
+  implementers: [RSA, ECDSA, ED25519]
 
 - kind: receiver
   interface_package: crypto
@@ -42,7 +66,7 @@
   interface_package: crypto
   interface_name: Signer
   usage: signing
-  implementers: [RSA, ECDSA]
+  implementers: [RSA, ECDSA, ED25519]
 
 - kind: argument
   func: crypto/x509.CreateCertificateRequest
@@ -50,7 +74,7 @@
   interface_package: crypto
   interface_name: Signer
   usage: signing
-  implementers: [RSA, ECDSA]
+  implementers: [RSA, ECDSA, ED25519]
 
 - kind: argument
   func: crypto/x509.CreateRevocationList
@@ -58,7 +82,15 @@
   interface_package: crypto
   interface_name: Signer
   usage: signing
-  implementers: [RSA, ECDSA]
+  implementers: [RSA, ECDSA, ED25519]
+
+- kind: argument
+  func: crypto/x509.CreateCRL
+  arg_index: 1
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA, ED25519]
 
 - kind: argument
   func: golang.org/x/crypto/ocsp.CreateResponse
@@ -66,12 +98,80 @@
   interface_package: crypto
   interface_name: Signer
   usage: signing
-  implementers: [RSA, ECDSA]
+  implementers: [RSA, ECDSA, ED25519]
 
-# Deliberately not included yet, see qsafe.md for why:
-#   - crypto/x509.Certificate.CreateCRL — deprecated, and a method call on
-#     an arbitrary local receiver rather than a package-qualified function,
-#     doesn't fit the `func:` matching shape here.
-#   - crypto/tls.Certificate.PrivateKey — a struct field, not a function
-#     argument at all; needs a third `kind` (struct_field) this schema
-#     doesn't have yet.
+# golang.org/x/crypto/ssh: host/user keys are wrapped into an ssh.Signer
+# one of two ways. NewSignerFromSigner takes a real crypto.Signer, same
+# shape as the argument rules above. NewSignerFromKey takes `interface{}`
+# and switches on the concrete type internally — one rule per concrete key
+# type it's documented to accept (*rsa.PrivateKey, *ecdsa.PrivateKey,
+# ed25519.PrivateKey), each an `implementers` singleton since the concrete
+# type already identifies the primitive.
+- kind: argument
+  func: golang.org/x/crypto/ssh.NewSignerFromSigner
+  arg_index: 0
+  interface_package: crypto
+  interface_name: Signer
+  usage: signing
+  implementers: [RSA, ECDSA, ED25519]
+
+- kind: argument
+  func: golang.org/x/crypto/ssh.NewSignerFromKey
+  arg_index: 0
+  interface_package: crypto/rsa
+  interface_name: PrivateKey
+  usage: signing
+  implementers: [RSA]
+
+- kind: argument
+  func: golang.org/x/crypto/ssh.NewSignerFromKey
+  arg_index: 0
+  interface_package: crypto/ecdsa
+  interface_name: PrivateKey
+  usage: signing
+  implementers: [ECDSA]
+
+- kind: argument
+  func: golang.org/x/crypto/ssh.NewSignerFromKey
+  arg_index: 0
+  interface_package: crypto/ed25519
+  interface_name: PrivateKey
+  usage: signing
+  implementers: [ED25519]
+
+# crypto/tls.Certificate.PrivateKey: a struct field, not a function
+# argument — see the struct_field kind's doc above. One rule per concrete
+# key type tls.Certificate.PrivateKey is documented to accept, same
+# implementers-singleton reasoning as ssh.NewSignerFromKey above.
+- kind: struct_field
+  interface_package: crypto/tls
+  interface_name: Certificate
+  field: PrivateKey
+  value_package: crypto/rsa
+  value_name: PrivateKey
+  usage: signing
+  implementers: [RSA]
+
+- kind: struct_field
+  interface_package: crypto/tls
+  interface_name: Certificate
+  field: PrivateKey
+  value_package: crypto/ecdsa
+  value_name: PrivateKey
+  usage: signing
+  implementers: [ECDSA]
+
+- kind: struct_field
+  interface_package: crypto/tls
+  interface_name: Certificate
+  field: PrivateKey
+  value_package: crypto/ed25519
+  value_name: PrivateKey
+  usage: signing
+  implementers: [ED25519]
+
+# Deliberately not included: crypto/tls.Certificate.PrivateKey assigned via
+# a plain assignment statement (cert.PrivateKey = key) rather than a
+# composite literal — the struct_field kind above only matches keyed
+# composite literals, the overwhelmingly common real-world form (tls.Config
+# is built as a literal far more often than mutated field-by-field).

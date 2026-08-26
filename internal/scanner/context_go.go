@@ -21,15 +21,22 @@ import (
 // pointer nil rather than an empty-but-non-nil struct when truly nothing
 // was extracted).
 func buildContext(file *ast.File, fset *token.FileSet, call *ast.CallExpr) *findings.Context {
-	fn, _ := enclosingFuncName(file, call.Pos())
-	args := argumentTexts(fset, call)
+	return buildContextAt(file, fset, call.Pos(), argumentTexts(fset, call))
+}
+
+// buildContextAt is buildContext's shared core, generalized to any node
+// position with its own notion of "arguments" — used directly by
+// interface_dispatch_go.go's struct_field rule kind, where the site is a
+// composite-literal field value, not a call's argument list.
+func buildContextAt(file *ast.File, fset *token.FileSet, pos token.Pos, args []string) *findings.Context {
+	fn, _ := enclosingFuncName(file, pos)
 	if fn == "" && len(args) == 0 {
 		return nil
 	}
-	pos := fset.Position(call.Pos())
+	p := fset.Position(pos)
 	return &findings.Context{
 		Function:  fn,
-		InTest:    strings.HasSuffix(pos.Filename, "_test.go"),
+		InTest:    strings.HasSuffix(p.Filename, "_test.go"),
 		Arguments: args,
 	}
 }
