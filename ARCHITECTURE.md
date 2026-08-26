@@ -15,7 +15,7 @@
 |---|---|
 | Name | `qsafe` |
 | Module path | `github.com/1MansiS/qsafe` |
-| Distribution | `go install` / prebuilt release binaries. No Docker image planned for now. |
+| Distribution | `go install` / prebuilt release binaries |
 | License | Apache 2.0 |
 
 ---
@@ -51,19 +51,18 @@ qsafe/
 │   │   │   └── interface_dispatch.yaml  # crypto.Signer/Decrypter dispatch rules
 │   │   └── codebase.go     # ScanDir: module walking + aggregation
 │   ├── findings/           # Shared finding data model (Finding.Confidence: direct | heuristic)
-│   ├── rag/                # Embedded retrieval — pure Go, no cgo, no server.
-│   │   │                   # Loads the flat-file index built offline by
-│   │   │                   # rag-pipeline/, does cosine similarity in-process.
-│   │   │                   # No embedding model runs at runtime — see "Retrieval" below.
+│   ├── rag/                # Embedded retrieval, in-process. Loads the flat-file
+│   │   │                   # index built offline by rag-pipeline/, does cosine
+│   │   │                   # similarity in-process — see "Retrieval" below.
 │   │   └── rag.go          # Retrieve(primitive, usage, topK) — called directly by internal/explain
 │   └── explain/            # explain_finding/suggest_migration logic — retrieval
 │       │                   # + formatting only, no LLM call; see package doc
 │       ├── explain.go
 │       └── migrate.go
 │
-├── research/                # Historical design exploration (tree-sitter-go
-│                             # evaluation) — see research/README.md. Not wired
-│                             # into any build; isolated as its own Go module.
+├── research/                # Historical design exploration — see
+│                             # research/README.md. Not wired into any build;
+│                             # isolated as its own Go module.
 │
 ├── mcp/
 │   ├── server.go           # MCP server setup, tool registration
@@ -149,21 +148,19 @@ four tools to any MCP-compatible LLM host.
   Explicitly
   does **not** include caller/reachability information (who calls this,
   what's downstream) — that's a different, much more expensive class of
-  analysis, considered and deferred; see "Future Enhancements" below.
+  analysis; see "Future Enhancements" below.
 - No RAG involved — pure deterministic analysis
 
 `explain_finding(finding: Finding) → explain.Result` (`internal/explain`)
-- Calls RAG service: `POST /retrieve { primitive, usage, top_k: 5 }`
+- Calls `internal/rag.Retrieve(primitive, usage, topK: 5)` directly, in-process
 - Receives top-k chunks from FIPS/CNSA/annotation corpus
 - **Does not call an LLM itself.** Returns `{ finding, chunks, instructions }`
   — the chunks as grounding, plus a plain-language instruction telling the
   *calling* model (the MCP host's own LLM, already in the conversation) to
-  write the explanation from them, with citations. Deliberate design
-  choice — see `internal/explain`'s package doc for the full reasoning:
-  no API key needed (consistent with every other zero-setup choice in
-  this project), it's the native MCP pattern (tools return context, the
-  host model reasons over it), and it avoids duplicating generation
-  capability the host already has.
+  write the explanation from them, with citations. See `internal/explain`'s
+  package doc for the full reasoning: it's the native MCP pattern (tools
+  return context, the host model reasons over it), and it avoids
+  duplicating generation capability the host already has.
 
 `suggest_migration(finding: Finding) → explain.Result`
 - Same shape and same no-LLM-call design as `explain_finding` — only the
@@ -193,10 +190,7 @@ query is always exactly `(primitive, usage)`, drawn from the same small
 enumerated set already in `rules/go/direct/shor.yaml`. That means query
 embeddings, not just corpus embeddings, can be precomputed once at
 ingestion time — runtime needs **zero ML inference**, just array lookup
-and arithmetic. (If a future need for genuinely open-ended queries
-emerges, this assumption breaks and live embedding inference would be
-needed again — a cgo ONNX binding, or a Python sidecar. Not a concern
-today; the current design doesn't accept free-text input anywhere.)
+and arithmetic.
 
 **Ingestion — offline, maintainer-run, Python (`rag-pipeline/ingest/`),
 never shipped to end users:**
@@ -209,7 +203,7 @@ never shipped to end users:**
   (~annually at most). Output ships as a repo-committed file or a
   release asset (a few MB at this corpus size).
 
-**Runtime (`internal/rag`, pure Go, no cgo):**
+**Runtime (`internal/rag`):**
 ```
 Retrieve(primitive, usage, topK)
     → look up the precomputed query vector for (primitive, usage)
@@ -281,9 +275,8 @@ when the corpus changes.
 
 ### 3. Infrastructure
 
-None required to run qsafe. No Docker, no Qdrant, no separate RAG
-service, no API keys — a single `go install`-able binary does scanning,
-retrieval, and MCP serving in one process.
+A single `go install`-able binary does scanning, retrieval, and MCP
+serving in one process.
 
 **Building the index (maintainer only, when the corpus changes):**
 ```bash
@@ -314,20 +307,19 @@ Then in `.mcp.json`:
 ## Data Flow (Runtime)
 
 Everything inside the dashed `qsafe` boundary is **one Go binary, one
-process** — no separate RAG service, no LLM call anywhere inside it. The
-"Offline" box only ever runs on the maintainer's machine, when the
-corpus changes; it is never part of what an end user runs.
+process**. The "Offline" box only ever runs on the maintainer's machine,
+when the corpus changes; it is never part of what an end user runs.
 
 ```mermaid
 flowchart TB
     Dev(["Developer"])
     Model["Host's own LLM<br/>(Claude Code / Cursor / Claude Desktop)"]
 
-    subgraph QSafe["qsafe — single Go binary, no cgo, no separate services"]
+    subgraph QSafe["qsafe — single Go binary, one process"]
         direction TB
         Scan["scan_file / assess_codebase<br/>go/ast + YAML rules<br/>+ optional go/types interface-dispatch"]
         Explain["explain_finding / suggest_migration<br/>retrieval + formatting only, no LLM call"]
-        Rag["internal/rag<br/>in-process cosine similarity, no cgo"]
+        Rag["internal/rag<br/>in-process cosine similarity"]
         Index[("flat-file index<br/>chunks + precomputed<br/>query vectors")]
 
         Scan --> Explain
@@ -355,22 +347,13 @@ flowchart TB
 
 ## Phased Build Plan
 
-### Phase 0 — Foundations (Week 1)
-*Goal: repo skeleton, toolchain verified, nothing broken.* Historical:
-describes the original Qdrant/FastAPI-based scaffold, superseded by the
-embedded-retrieval design described in "Retrieval" above. Kept for
-history rather than rewritten:
+### Phase 0 — Foundations (Week 1) ✅ Complete
+*Goal: repo skeleton, toolchain verified, nothing broken.*
 
-- [ ] Initialize monorepo: `go mod init github.com/1MansiS/qsafe`
-- [ ] Scaffold directory structure (all dirs, empty `.go` and `.py` stubs)
-- [ ] Confirm `modelcontextprotocol/go-sdk` compiles; write a hello-world MCP
-      server that returns a hardcoded string
-- [ ] Start local Qdrant via Docker: `docker run -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant`
-- [ ] `rag-pipeline/api/main.py`: stub FastAPI with `/health` and `/retrieve`
-      returning hardcoded chunks
-- [ ] Wire Go MCP server → stub RAG service over HTTP; confirm round-trip
-- [ ] Deliverable: MCP server registers one tool (`ping`), calls RAG stub,
-      returns response. Visible in MCP Inspector.
+- [x] Initialize monorepo: `go mod init github.com/1MansiS/qsafe`
+- [x] Scaffold directory structure
+- [x] Confirm `modelcontextprotocol/go-sdk` compiles; hello-world MCP server
+- [x] Deliverable: MCP server registers a tool, round-trip confirmed in MCP Inspector.
 
 ---
 
@@ -422,10 +405,10 @@ corpus — no separate service, see "Retrieval" above for the design.*
     active rule set, no annotation needed)
 - [ ] Write `ingest/embedder.py`: embed chunks *and* every possible
       `(primitive, usage)`/`(primitive, usage+"_migration")` query string
-      (`sentence-transformers/all-MiniLM-L6-v2`, local, no API key),
+      (`sentence-transformers/all-MiniLM-L6-v2`, local),
       serialize both to a flat-file index
 - [ ] Implement `internal/rag/rag.go`: load the flat file at startup,
-      cosine similarity + optional BM25 blend, pure Go, no cgo
+      cosine similarity + optional BM25 blend
 - [ ] Wire `internal/explain` to call `internal/rag.Retrieve` directly
       (already calls `ragclient.Retrieve` today against the stub — swap
       the implementation, not the call site)
@@ -479,12 +462,9 @@ corpus — no separate service, see "Retrieval" above for the design.*
 
 ### Phase 5 — Hardening + OSS Launch (Week 8)
 *Goal: project is demo-able, documented, and ready for public GitHub.*
-No Docker/Qdrant deliverables here anymore — a prebuilt binary replaces
-the image-publishing goal:
 
 - [ ] `.mcp.json.example`: copy-paste config for Claude and Cursor users
-- [ ] `README.md`: clear setup in under 5 minutes (`go install`, no
-      Docker, no API keys), demo GIF/video
+- [ ] `README.md`: clear setup in under 5 minutes (`go install`), demo GIF/video
 - [ ] MCP Inspector test pass: all four tools exercise correctly
 - [ ] Test against several real OSS Go repos
 - [ ] GitHub Actions CI: lint, test, cross-compile and publish release
@@ -557,12 +537,12 @@ build.
 
 | Layer | Technology | Rationale |
 |---|---|---|
-| MCP server | Go, `modelcontextprotocol/go-sdk` | Single binary, `go install`-able, no cgo |
+| MCP server | Go, `modelcontextprotocol/go-sdk` | Single binary, `go install`-able |
 | Go static analysis | `go/parser` + `go/ast` (stdlib) | Zero deps, O(1) memory per file, handles all import alias forms |
 | Interface-dispatch heuristic | `go/types` + `go/packages` | Real type info without full SSA/CHA cost; opt-in, needs a buildable module |
-| Retrieval (runtime) | `internal/rag`, pure Go, no cgo | In-process cosine similarity over a precomputed flat-file index — no server, no embedding model loaded at runtime; see "Retrieval" above |
+| Retrieval (runtime) | `internal/rag` (Go) | In-process cosine similarity over a precomputed flat-file index; see "Retrieval" above |
 | Corpus ingestion (offline, maintainer-only) | Python, `sentence-transformers` | PDF parsing + embedding tooling is Python-native; never shipped to end users, run rarely (corpus changes rarely) |
-| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | Local, free, no API key; computed once offline, both corpus chunks and the bounded query set |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | Local and free; computed once offline, both corpus chunks and the bounded query set |
 
 ---
 
@@ -580,18 +560,14 @@ fighting that ecosystem in Go for a step that runs maybe once a year
 would waste effort with no user-facing benefit. Everything a user
 actually runs — scanning, retrieval, MCP serving — is one Go binary.
 
-**Why not Qdrant (or any vector database)?**
-Originally planned — dropped once the corpus size (low thousands of
-chunks at most: FIPS 203/204/205, CNSA 2.0, RFC 9180, hand-authored
-playbooks) made a dedicated vector database disproportionate to the
-actual problem. A vector DB's value proposition is approximate-but-fast
-search over millions of vectors via indexes like HNSW; at this scale,
-brute-force cosine similarity over an in-memory array is *exact* (no
-approximation) and takes microseconds — strictly better, not a
-compromise. The further enabler: `explain_finding`/`suggest_migration`'s
-queries are bounded to `(primitive, usage)` pairs, not free text, so
-query embeddings can be precomputed offline too — runtime needs zero ML
-inference, just array lookup and arithmetic. See "Retrieval" above.
+**Why brute-force cosine similarity, not a vector index?**
+The corpus is small (low thousands of chunks at most: FIPS 203/204/205,
+CNSA 2.0, RFC 9180, hand-authored playbooks). At that scale, linear-scan
+cosine similarity over an in-memory array is exact, not approximate, and
+takes microseconds. Combined with the bounded query space (queries are
+always `(primitive, usage)` pairs, never free text — see "Retrieval"
+above), this keeps runtime retrieval to array lookup and arithmetic,
+with no ML inference needed at request time.
 
 **Why hybrid retrieval (dense + BM25)?**
 Algorithm names like `ML-KEM-768`, `FIPS 203`, `RFC 9180` are exact tokens
