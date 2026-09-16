@@ -1,3 +1,16 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-pydantic>=2.0.0
+# Offline, maintainer-run ingestion tooling only — never shipped to end
+# users, run rarely (corpus changes rarely). See ARCHITECTURE.md's
+# "Retrieval" section.
+#
+# Kept minimal and grown step by step as rag-pipeline/ingest/ actually
+# needs each dependency, rather than front-loading the full Phase 2 list
+# (sentence-transformers etc.) before it's used.
+
+# Step 1: PDF -> Markdown conversion. unstructured was evaluated and
+# dropped — its PDF module hard-imports pi_heif (HEIC image support,
+# irrelevant to a text-based spec PDF), which needs the system libheif
+# library to even build. pymupdf4llm installed clean, zero friction.
+pymupdf4llm
+
+# Dev/test only.
+pytest
