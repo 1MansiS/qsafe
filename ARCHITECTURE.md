@@ -11,42 +11,49 @@
 
 ## Data Flow (Runtime)
 
-Everything inside the dashed `qsafe` boundary is **one Go binary, one
-process**. The "Offline" box only ever runs on the maintainer's machine,
-when the corpus changes; it is never part of what an end user runs.
+Everything in the `qsafe` box is **one Go binary, one process**. The two
+MCP tools inside it are marked explicitly. The RAG index is built offline
+by `rag-pipeline/` (Python, maintainer-run, only when the corpus
+changes), then shipped with the binary; that build step isn't shown here
+since it never runs on an end user's machine, see "Retrieval" below for
+the offline pipeline itself.
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 90, 'rankSpacing': 70}}}%%
 flowchart TB
     Dev(["Developer"])
     Model["Host's own LLM<br/>(Claude Code / Cursor / Claude Desktop)"]
 
-    subgraph QSafe["qsafe — single Go binary, one process"]
+    subgraph QSafe["qsafe MCP server — single Go binary"]
         direction TB
-        Scan["scan_file / assess_codebase<br/>go/ast + YAML rules<br/>+ optional go/types interface-dispatch"]
-        Explain["explain_finding / suggest_migration<br/>retrieval + formatting only, no LLM call"]
-        Rag["internal/rag<br/>in-process cosine similarity"]
-        Index[("flat-file index<br/>chunks + precomputed<br/>query vectors")]
+        Scan["MCP tool: scan_file / assess_codebase<br/>go/ast + YAML rules"]
+        Explain["MCP tool: explain_finding / suggest_migration<br/>retrieval only, no LLM call"]
+        Rag[("RAG index (flat-file)<br/>standards chunks + migration playbooks")]
 
-        Scan --> Explain
         Explain --> Rag
-        Rag --> Index
     end
-
-    subgraph Offline["Offline — maintainer only, run rarely (corpus changes rarely)"]
-        direction TB
-        Corpus[("FIPS 203/204/205, CNSA 2.0,<br/>hand-authored migration playbooks")]
-        Ingest["rag-pipeline/ingest (Python)<br/>chunk + embed corpus AND<br/>every (primitive, usage) query string"]
-        Corpus --> Ingest
-    end
-    Ingest -. "produces, ships as repo/release asset" .-> Index
 
     Dev -- "1 - scan this repo" --> Model
-    Model -- "2 - scan_file/assess_codebase" --> Scan
-    Scan -- "3 - FindingSet" --> Model
-    Model -- "4 - explain this finding" --> Explain
-    Explain -- "5 - grounded chunks + instructions,<br/>no generated text" --> Model
-    Model -- "6 - writes the explanation,<br/>citing FIPS/CNSA sources" --> Dev
+    Model -- "2 - calls scan_file" --> Scan
+    Scan -- "3 - findings" --> Model
+    Model <-- "4 - findings, then dev's follow-up ask" --> Dev
+    Model -- "5 - calls explain_finding" --> Explain
+    Explain -- "6 - grounded chunks" --> Model
+    Model -- "7 - writes explanation" --> Dev
 ```
+
+---
+
+## Example Session
+
+*Placeholder. A real terminal recording or GIF goes here once the RAG
+pipeline is wired end to end (Phase 2). Sketch of the intended flow:*
+
+1. Developer, in Claude Code: "scan this repo for quantum-vulnerable crypto"
+2. `scan_file` finds `rsa.EncryptPKCS1v15(...)` in `auth/session.go:42`, returns an `RSA`/`encryption` finding
+3. Developer: "explain this one and tell me how to migrate it"
+4. `explain_finding` + `suggest_migration` return grounded chunks: a FIPS 203 excerpt and the `rsa-to-mlkem` playbook
+5. Claude writes the explanation and a concrete ML-KEM migration snippet, citing FIPS 203
 
 ---
 
@@ -54,7 +61,7 @@ flowchart TB
 
 1. **MCP-first.** The primary interface is an MCP server consumed by Claude, Cursor, or any MCP-compatible host, launched directly by the host as a single binary.
 2. **RAG is an implementation detail, embedded in the same binary.** MCP clients see only tool results. Retrieval runs in-process, with no separate service to run alongside it, and is swappable without changing the MCP interface.
-3. **Shared core.** Static analysis logic lives in `internal/scanner/`, imported by the MCP server. Written once, reusable if other interfaces are added later.
+3. **Shared core, `go/ast` is an implementation detail.** Static analysis logic lives in `internal/scanner/`; callers only ever see `ScanFile`/`ScanDir` returning `Finding`/`FindingSet`, never `go/ast` directly. Today that's `go/parser` + `go/ast`, chosen over tree-sitter-go for deployment simplicity (both were tied on capability, see `research/`), not because the interface demands it. Swapping the walker, or adding another language behind the same `Finding` shape, wouldn't touch a single caller.
 
 ---
 
@@ -86,154 +93,34 @@ See "Component Overview" below for what each of `internal/scanner`,
 
 ### 1. MCP Server (Go)
 
-**What it is:** A long-running Streamable HTTP server at `/mcp` that exposes
-four tools to any MCP-compatible LLM host.
-
-**Stack:** Go, `modelcontextprotocol/go-sdk`
-
-**Tools exposed:**
+Long-running Streamable HTTP server at `/mcp`, `modelcontextprotocol/go-sdk`.
+Four tools:
 
 | Tool | Mechanism | Uses RAG? |
 |---|---|---|
-| `scan_file` | `go/ast` import-alias walk, YAML-rule-driven | No, pure static analysis |
-| `explain_finding` | Retrieval only, no LLM call, see below | Yes, returns grounding chunks for the *calling* model to write from |
-| `suggest_migration` | Retrieval only, no LLM call, see below | Yes, returns migration-playbook chunks for the *calling* model to write from |
-| `assess_codebase` | Aggregation + scoring | Partially: RAG for compliance mapping |
+| `scan_file` | `go/ast` import-alias walk, YAML-rule-driven | No |
+| `explain_finding` | Retrieval only, no LLM call | Yes, grounding chunks for the calling model to write from |
+| `suggest_migration` | Retrieval only, no LLM call | Yes, migration-playbook chunks |
+| `assess_codebase` | Aggregates `scan_file` across a repo | Partially, compliance mapping |
 
-**Tool details:**
-
-`scan_file(path: string) → FindingSet`
-- `go/parser` + `go/ast`: builds per-file import-alias map, walks call
-  expressions, resolves `X.Fn(...)` against `rules/go/direct/*.yaml`'s
-  per-package function allowlists. O(1) memory per file.
-- `ScanDir` (used by `assess_codebase`) can optionally also run the
-  interface-dispatch heuristic (`WithInterfaceDispatch`), which needs a
-  buildable module (`go/types`/`go/packages`), off by default.
-- Returns structured `FindingSet`: `[{ primitive, usage, file, line, severity, confidence, detail, context }]`
-  , where `confidence` is `direct` or `heuristic`, see `internal/findings`.
-- **`context`**: per-call-site info extracted by the same AST walk
-  already visiting the call, including argument source text via `go/printer`
-  (e.g. `rsa.GenerateKey(rand.Reader, 2048)` → `["rand.Reader", "2048"]`;
-  not restricted to literals, since picking apart "which argument is the
-  meaningful one" would need per-function-signature knowledge, the kind
-  of hardcoded-in-Go primitive knowledge this project deliberately keeps
-  out in favor of YAML rules) and the enclosing function/file (e.g.
-  `useRSA`, not a `_test.go` file). Cheap: no new analysis tier, no
-  call-graph traversal, just reading more off the same node
-  (`internal/scanner/context_go.go`, shared by both the direct-call and
-  interface-dispatch paths). Threaded through to `explain_finding`/
-  `suggest_migration` (`FindingParams` → `contextClause` in
-  `internal/explain`) as an extra grounding clause in `Instructions`.
-  Explicitly does **not** include caller/reachability information (who
-  calls this, what's downstream), since that's a different, much more
-  expensive class of analysis; see "Future Enhancements" below.
-- No RAG involved: pure deterministic analysis
-
-`explain_finding(finding: Finding) → explain.Result` (`internal/explain`)
-- Calls `internal/rag.Retrieve(primitive, usage, topK: 5)` directly, in-process
-- Receives top-k chunks from FIPS/CNSA/annotation corpus
-- **Does not call an LLM itself.** Returns `{ finding, chunks, instructions }`
-  , the chunks as grounding, plus a plain-language instruction telling the
-  *calling* model (the MCP host's own LLM, already in the conversation) to
-  write the explanation from them, with citations. See `internal/explain`'s
-  package doc for the full reasoning: it's the native MCP pattern (tools
-  return context, the host model reasons over it), and it avoids
-  duplicating generation capability the host already has.
-
-`suggest_migration(finding: Finding) → explain.Result`
-- Same shape and same no-LLM-call design as `explain_finding`. Only the
-  retrieval query (usage-scoped to `<usage>_migration`, matching how the
-  annotation playbooks are tagged) and the instructions text differ
-  (asks for a concrete before/after code change + hybrid-mode caveat,
-  not an explanation)
-
-`assess_codebase(path: string) → CryptoInventoryReport`
-- Calls `scan_file` across all files in path
-- Aggregates findings into a CBOM (Cryptography Bill of Materials)
-- Produces prioritized migration roadmap
-- Maps findings to CNSA 2.0 compliance gaps
+- `scan_file`: opt-in `go/types` interface-dispatch heuristic (`WithInterfaceDispatch`), off by default, needs a buildable module.
+- Every finding carries `context`: enclosing function + argument source text, same AST walk, no call-graph, no extra analysis tier.
+- `explain_finding`/`suggest_migration` never call an LLM. They return `{ finding, chunks, instructions }`; the *calling* model (already in the conversation) writes the explanation from the grounded chunks. See `internal/explain`'s package doc for the full reasoning.
+- `assess_codebase`: aggregates findings into a CBOM (Cryptography Bill of Materials), maps to CNSA 2.0 compliance gaps.
 
 ---
 
 ### 2. Retrieval (embedded in the Go binary)
 
-**What it is:** An in-process Go package (`internal/rag`), called directly
-by `internal/explain`. No HTTP boundary, no server, no port. The corpus is
-small (a handful of PDFs plus hand-written playbooks, low thousands of
-chunks at most), so in-memory search is a natural fit at this scale.
+In-process Go package (`internal/rag`), called directly by `internal/explain`.
+No server, no port. Corpus is small (low thousands of chunks at most), so
+in-memory search is enough.
 
-**The key enabler: the query side is bounded, not just the corpus.**
-`explain_finding`/`suggest_migration` never take free-text queries. The
-query is always exactly `(primitive, usage)`, drawn from the same small
-enumerated set already in `rules/go/direct/shor.yaml`. That means query
-embeddings, not just corpus embeddings, can be precomputed once at
-ingestion time, so runtime needs **zero ML inference**, just array lookup
-and arithmetic.
-
-**Ingestion: offline, maintainer-run, Python (`rag-pipeline/ingest/`),
-never shipped to end users:**
-- `loader.py`: parse corpus PDFs
-- `chunker.py`: section-aware chunking; metadata per chunk (`primitive_type`, `operation`, `source`)
-- `embedder.py`: embeds every chunk *and* every possible `(primitive, usage)`
-  query string (`sentence-transformers/all-MiniLM-L6-v2`, local, no API
-  key), serializes both to a flat-file index
-- Run only when the corpus changes: NIST standards change rarely
-  (~annually at most). Output ships as a repo-committed file or a
-  release asset (a few MB at this corpus size).
-
-**Runtime (`internal/rag`):**
-```
-Retrieve(primitive, usage, topK)
-    → look up the precomputed query vector for (primitive, usage)
-    → cosine similarity against every stored chunk vector
-      (linear scan, exact — not approximate; trivial at this scale)
-    → optional BM25 blend (also precomputable arithmetic, no server)
-    → sort, return top-k chunks
-```
-
-**The primitive→replacement mapping is a lookup table, not something RAG
-retrieval figures out.** NIST/CNSA state *which classical algorithms are
-Shor-broken*; they don't state *"RSA-signing → ML-DSA"* as a retrievable
-sentence anywhere. That mapping is synthesized expert knowledge (the
-actual "moat" this project provides, see the annotation playbooks
-below), not something semantic search over the FIPS corpus could ever
-reliably produce. So it's not a RAG-intelligence problem, it's a
-config file: `rag-pipeline/corpus/migration_map.yaml` (planned, added
-when Phase 2 starts), one entry per `(primitive, usage)` pair, e.g.:
-
-```yaml
-- primitive: RSA
-  usage: signing
-  replacement: ML-DSA
-  standard: FIPS 204
-- primitive: RSA
-  usage: encryption
-  replacement: ML-KEM
-  standard: FIPS 203
-- primitive: ED25519
-  usage: signing
-  replacement: ML-DSA
-  alternative: SLH-DSA   # different math (hash-based) — defense-in-depth option
-  standard: FIPS 204
-```
-
-**Keyed on `(primitive, usage)`, never on `primitive` alone.** This is
-what actually resolves "how do we know if an algorithm is being used
-for signing vs. key exchange without extra context": we already have
-that context, because `rules/go/direct/*.yaml` assigns `usage`
-**per function**, not per primitive (e.g. `rsa.SignPKCS1v15` →
-`signing`, `rsa.EncryptPKCS1v15` → `encryption`, two separate findings
-even though both are "RSA"). No new capability needed for this; the
-data model already carries the disambiguating signal.
-
-One correction worth recording since it clarifies the general
-principle: RSA is genuinely dual-use (can sign *or* encrypt/key-wrap,
-hence the ambiguity), but **not every primitive is**. Ed25519 (EdDSA)
-and X25519 are different algorithms sharing Curve25519, not one
-algorithm used two ways. Ed25519 is unambiguously signing-only; it
-would never map to ML-KEM. The `(primitive, usage)` keying handles both
-cases uniformly regardless: genuinely dual-use primitives just end up
-with more than one row.
+- **Bounded queries.** `explain_finding`/`suggest_migration` only ever query `(primitive, usage)`, a small fixed set already in `rules/go/direct/shor.yaml`. Query embeddings, not just corpus embeddings, get precomputed offline too; runtime needs zero ML inference.
+- **Ingestion** (offline, maintainer-run, `rag-pipeline/ingest/`, never shipped): `loader.py` parses PDFs, `chunker.py` does section-aware chunking, `embedder.py` embeds chunks and every `(primitive, usage)` query string (`sentence-transformers/all-MiniLM-L6-v2`, local). Runs only when the corpus changes.
+- **Runtime.** `Retrieve(primitive, usage, topK)`: look up the precomputed query vector, cosine similarity against every chunk vector (linear scan, exact at this scale), optional BM25 blend, return top-k.
+- **Mapping is config, not RAG.** `(primitive, usage) → replacement` is a lookup table (`migration_map.yaml`), not something semantic search infers, since NIST doesn't state "RSA-signing → ML-DSA" anywhere as a retrievable sentence. See the worked example below for a full row.
+- **Keyed on `(primitive, usage)`, not primitive alone.** `shor.yaml` already assigns `usage` per function (e.g. `rsa.SignPKCS1v15` is `signing`, `rsa.EncryptPKCS1v15` is `encryption`), so dual-use primitives like RSA just get two rows instead of one ambiguous one.
 
 **Corpus:**
 
@@ -245,9 +132,6 @@ with more than one row.
 | CNSA 2.0 Suite | NSA migration timeline requirements |
 | RFC 9180 (HPKE) | Hybrid public key encryption |
 | Hand-authored annotations | Curated migration playbooks, each tagged with a `<usage>_migration` key matching `suggest_migration`'s query |
-
-**Update cadence:** Static index, rebuilt offline by the maintainer only
-when the corpus changes.
 
 ---
 
@@ -282,6 +166,74 @@ Then in `.mcp.json`:
 
 ---
 
+## Worked Example: One Thread Through the Pipeline
+
+RSA encryption, end to end: the detection rule, the finding it produces,
+the config that maps it to a replacement, and the two kinds of chunk
+`explain_finding`/`suggest_migration` retrieve for it.
+
+**1. Detection rule** (`internal/scanner/rules/go/direct/shor.yaml`):
+```yaml
+- primitive: RSA
+  import: crypto/rsa
+  functions:
+    EncryptPKCS1v15: encryption
+```
+
+**2. The finding it produces** (`findings.Finding`, shape only):
+```json
+{
+  "primitive": "RSA",
+  "usage": "encryption",
+  "file": "auth/session.go",
+  "line": 42,
+  "confidence": "direct"
+}
+```
+
+**3. The replacement lookup** (`migration_map.yaml`, planned):
+```yaml
+- primitive: RSA
+  usage: encryption
+  replacement: ML-KEM
+  standard: FIPS 203
+```
+
+**4. A standards chunk `explain_finding` retrieves** (real, from the
+FIPS 203 chunker built in Phase 2's step 4, `internal/rag`'s `algorithm: ML-KEM`
+join key resolves to this):
+```json
+{
+  "id": "fips-203#8",
+  "source": "fips-203",
+  "section": "8 Parameter Sets",
+  "algorithm": "ML-KEM",
+  "doc_type": "standard",
+  "text": "NIST recommends using ML-KEM-768 as the default parameter set, as it provides a large security margin at a reasonable performance cost..."
+}
+```
+
+**5. A playbook chunk `suggest_migration` retrieves** (illustrative,
+`rsa-to-mlkem.md` isn't written yet, this is the target shape):
+```json
+{
+  "id": "rsa-to-mlkem#1",
+  "source": "rsa-to-mlkem",
+  "algorithm": "ML-KEM",
+  "doc_type": "playbook",
+  "primitive": "RSA",
+  "usage": "encryption_migration",
+  "text": "Before: rsa.EncryptPKCS1v15(...). After: ML-KEM key encapsulation via <Go PQC library, not yet pinned>. Hybrid mode caveat: ..."
+}
+```
+
+Both chunks share `algorithm: ML-KEM`, that's the join `internal/rag`
+uses; both get returned to the calling model, which writes the final
+explanation citing FIPS 203 and following the playbook's concrete
+before/after.
+
+---
+
 ## Future Enhancements
 
 Items deferred until after the OSS launch. Core static analysis logic in
@@ -296,28 +248,17 @@ Items deferred until after the OSS launch. Core static analysis logic in
 ### Call-graph context for explain_finding (considered, deferred, 2026-08-25)
 
 Proposed alongside `Finding.Context` (per-call-site argument values +
-enclosing function, which *did* get built, see `scan_file` above):
-also passing a "mini call-graph" (who calls this, what's reachable from
-where) to enrich `explain_finding`'s grounding, e.g. distinguishing
-"this RSA key generation is reachable from production request handling"
-vs. "only from a test fixture." Deferred rather than built: this is the
-same class of interprocedural/reachability analysis already ruled
-**permanently out of scope** in "Analysis depth" below, not a smaller
-variant of it. Even a "mini" call-graph needs either whole-module
-type-aware analysis (the same cost tier as the interface-dispatch
-heuristic) or unreliable heuristics. Revisit only as a deliberate,
-scoped decision on its own, not folded in casually alongside the cheap
-per-call-site context that shipped instead.
+enclosing function, which *did* get built, see `scan_file` above).
+
+- Would pass a "mini call-graph" (who calls this, what's reachable from where) to `explain_finding`, e.g. distinguishing "reachable from production request handling" vs. "only from a test fixture."
+- Same interprocedural/reachability class already ruled **permanently out of scope** below, not a smaller variant of it. Even "mini" needs whole-module type-aware analysis (same cost tier as interface-dispatch) or unreliable heuristics.
+- Revisit only as its own deliberate, scoped decision, not folded in alongside the cheap per-call-site context that shipped instead.
 
 ### Analysis depth: a deliberate ceiling
 
-qsafe does not do full interprocedural analysis (SSA and class
-hierarchy/call-graph analysis across a module's whole transitive
-dependency closure). That's a permanent scope boundary. The cost is real:
-SSA and CHA over a module's full dependency closure runs roughly 2 to 5
-times the transitive closure in memory, around 10 to 15 GB observed at
-Vault and go-ethereum scale. The two tiers below cover the highest-value
-part of this at a fraction of that cost.
+- No full interprocedural analysis (SSA and class hierarchy/call-graph analysis across a module's whole transitive dependency closure). Permanent scope boundary.
+- Real cost: SSA/CHA over a module's full dependency closure runs roughly 2 to 5 times the transitive closure in memory, 10 to 15 GB observed at Vault and go-ethereum scale.
+- The two tiers below cover the highest-value part of this at a fraction of that cost.
 
 **Two tiers, both implemented:**
 1. **Direct calls** (default, always on). `go/parser` + `go/ast`, one
@@ -357,37 +298,27 @@ build.
 ## Key Architectural Decisions
 
 **Why MCP-first?**
-MCP is the differentiating component: it's what makes this an AI × security
-project rather than another SAST linter. The agentic multi-tool chaining
-(scan → explain → migrate in one conversation turn) is only possible via MCP.
+- MCP is the differentiator: makes this an AI × security project, not another SAST linter.
+- Multi-tool chaining (scan → explain → migrate in one conversation turn) only works via MCP.
 
 **Why Go + Python at all, if there's no Python at runtime?**
-Python is offline, maintainer-only corpus tooling now. PDF parsing and
-embedding computation (`sentence-transformers`) are Python-native, and
-fighting that ecosystem in Go for a step that runs maybe once a year
-would waste effort with no user-facing benefit. Everything a user
-actually runs (scanning, retrieval, MCP serving) is one Go binary.
+- Python is offline, maintainer-only corpus tooling: PDF parsing and embedding (`sentence-transformers`) are Python-native.
+- Fighting that ecosystem in Go, for a step that runs maybe once a year, wastes effort for no user-facing benefit.
+- Everything a user actually runs (scanning, retrieval, MCP serving) is one Go binary.
 
 **Why brute-force cosine similarity, not a vector index?**
-The corpus is small (low thousands of chunks at most: FIPS 203/204/205,
-CNSA 2.0, RFC 9180, hand-authored playbooks). At that scale, linear-scan
-cosine similarity over an in-memory array is exact, not approximate, and
-takes microseconds. Combined with the bounded query space (queries are
-always `(primitive, usage)` pairs, never free text, see "Retrieval"
-above), this keeps runtime retrieval to array lookup and arithmetic,
-with no ML inference needed at request time.
+- Corpus is small (low thousands of chunks at most: FIPS 203/204/205, CNSA 2.0, RFC 9180, hand-authored playbooks).
+- At that scale, linear-scan cosine similarity over an in-memory array is exact, not approximate, and takes microseconds.
+- Bounded query space (`(primitive, usage)` pairs, never free text) keeps runtime to array lookup and arithmetic, no ML inference at request time.
 
 **Why hybrid retrieval (dense + BM25)?**
-Algorithm names like `ML-KEM-768`, `FIPS 203`, `RFC 9180` are exact tokens
-that embedding similarity handles poorly. BM25 catches exact matches; dense
-retrieval catches semantic similarity. Both are needed.
+- Exact tokens (`ML-KEM-768`, `FIPS 203`, `RFC 9180`) embedding similarity handles poorly.
+- BM25 catches exact matches; dense retrieval catches semantic similarity. Both needed.
 
 **Why section-aware chunking?**
-Naive fixed-size chunking splits algorithm definitions mid-spec, producing
-useless retrieved chunks. Section boundaries in NIST documents align with
-algorithm units, so chunking there preserves the coherent unit of knowledge.
+- Naive fixed-size chunking splits algorithm definitions mid-spec, useless retrieved chunks.
+- NIST section boundaries already align with algorithm units; chunking there preserves the coherent unit of knowledge.
 
 **Why hand-authored migration annotations?**
-No public document has "RSA-2048 KEM → ML-KEM-768 via oqs-provider" in one
-place. These playbooks encode domain expertise (SandboxAQ PQC + Veracode SAST
-background) that no public corpus has. This is the primary moat of the project.
+- No public document states "RSA-2048 KEM → ML-KEM-768 via oqs-provider" anywhere.
+- Playbooks encode domain expertise (SandboxAQ PQC + Veracode SAST background) that no public corpus has. Primary moat of the project.
