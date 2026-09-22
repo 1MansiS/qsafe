@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "qsafe": {
+      "command": "qsafe-mcp-server"
+    }
+  }
+}
