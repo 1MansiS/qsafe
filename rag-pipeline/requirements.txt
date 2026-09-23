@@ -12,5 +12,8 @@
 # library to even build. pymupdf4llm installed clean, zero friction.
 pymupdf4llm
 
+# Step 5: migration_map.yaml parsing, and needed by chunker/embedder going forward.
+pyyaml
+
 # Dev/test only.
 pytest

@@ -1,0 +1,62 @@
+# (primitive, usage) -> PQC replacement lookup table. Deterministic config,
+# not something RAG retrieval infers, see ARCHITECTURE.md's "Mapping is
+# config, not RAG" bullet. One row per (primitive, usage) pair in
+# internal/scanner/rules/go/direct/shor.yaml.
+#
+# `replacement`/`standard` are lists on the two rows where the classical
+# primitive alone doesn't reveal the actual downstream use (RSA and ECC's
+# bare key_generation calls, see shor.yaml's own header comment on this).
+# Everywhere else the source function already disambiguates
+# (SignPKCS1v15 vs EncryptPKCS1v15), so it's a single value. Resolving the
+# two ambiguous rows for real is qsafe.md's 2026-09-16 research-queue item
+# 1, not done here; this is the placeholder shape, not a guess presented
+# as settled.
+
+- primitive: RSA
+  usage: key_generation
+  replacement: [ML-KEM, ML-DSA]
+  standard: [FIPS 203, FIPS 204]
+  # ambiguous: rsa.GenerateKey alone doesn't reveal signing vs encryption
+
+- primitive: RSA
+  usage: signing
+  replacement: ML-DSA
+  standard: FIPS 204
+
+- primitive: RSA
+  usage: encryption
+  replacement: ML-KEM
+  standard: FIPS 203
+
+- primitive: ECDSA
+  usage: key_generation
+  replacement: ML-DSA
+  standard: FIPS 204
+
+- primitive: ECDSA
+  usage: signing
+  replacement: ML-DSA
+  standard: FIPS 204
+
+- primitive: ECDH
+  usage: key_generation
+  replacement: ML-KEM
+  standard: FIPS 203
+
+- primitive: ECC
+  usage: key_generation
+  replacement: [ML-KEM, ML-DSA]
+  standard: [FIPS 203, FIPS 204]
+  # ambiguous: crypto/elliptic direct calls back either ECDSA or ECDH
+
+- primitive: ED25519
+  usage: key_generation
+  replacement: ML-DSA
+  alternative: SLH-DSA   # different math (hash-based), defense-in-depth option
+  standard: FIPS 204
+
+- primitive: ED25519
+  usage: signing
+  replacement: ML-DSA
+  alternative: SLH-DSA
+  standard: FIPS 204
